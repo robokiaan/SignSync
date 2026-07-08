@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Large Media Assets (INCLUDE videos subset ~1.4GB)
+app/static/videos/*.mp4
+!app/static/videos/.gitkeep
+
+# IDEs & System
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+.agents/
+.gemini/

@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SignSync ISL - Learn Indian Sign Language with AI</title>
+    <link rel="stylesheet" href="styles.css?v=25">
+    
+    <!-- CDNs for MediaPipe and TF.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <!-- Header Navigation -->
+    <header id="main-header" style="display: none;">
+        <div class="logo">
+            <div class="logo-icon">🫱🏽</div>
+            <span>SignSync ISL</span>
+        </div>
+        <nav>
+            <button id="nav-dashboard" class="active" onclick="switchPage('dashboard')">Dashboard</button>
+            <button id="nav-dictionary" onclick="switchPage('dictionary')">Dictionary</button>
+        </nav>
+    </header>
+
+    <!-- App Container -->
+    <main>
+        
+        <!-- ================= AUTH: LOGIN SCREEN ================= -->
+        <div id="page-login" class="page active">
+            <div class="auth-container glass">
+                <div class="auth-header">
+                    <div class="logo" style="justify-content: center; margin-bottom: 1rem;">
+                        <div class="logo-icon">🫱🏽</div>
+                        <span>SignSync ISL</span>
+                    </div>
+                    <h2>Welcome Back</h2>
+                    <p>Enter your credentials to continue learning</p>
+                </div>
+                <form id="login-form" onsubmit="handleLogin(event)">
+                    <div class="form-group">
+                        <label for="login-username">Username or Email</label>
+                        <input type="text" id="login-username" class="form-input" required placeholder="e.g. learner">
+                    </div>
+                    <div class="form-group">
+                        <label for="login-password">Password</label>
+                        <input type="password" id="login-password" class="form-input" required placeholder="••••••••">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Log In</button>
+                </form>
+                <div class="auth-footer">
+                    Don't have an account? <a href="#" onclick="switchAuthPage('register')">Sign Up</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- ================= AUTH: REGISTER SCREEN ================= -->
+        <div id="page-register" class="page">
+            <div class="auth-container glass">
+                <div class="auth-header">
+                    <div class="logo" style="justify-content: center; margin-bottom: 1rem;">
+                        <div class="logo-icon">🫱🏽</div>
+                        <span>SignSync ISL</span>
+                    </div>
+                    <h2>Create Account</h2>
+                    <p>Start your Indian Sign Language journey today</p>
+                </div>
+                <form id="register-form" onsubmit="handleRegister(event)">
+                    <div class="form-group">
+                        <label for="register-username">Username</label>
+                        <input type="text" id="register-username" class="form-input" required minlength="3" placeholder="learner">
+                    </div>
+                    <div class="form-group">
+                        <label for="register-email">Email Address</label>
+                        <input type="email" id="register-email" class="form-input" required placeholder="learner@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label for="register-password">Password</label>
+                        <input type="password" id="register-password" class="form-input" required minlength="6" placeholder="••••••••">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Create Account</button>
+                </form>
+                <div class="auth-footer">
+                    Already have an account? <a href="#" onclick="switchAuthPage('login')">Log In</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- ================= DASHBOARD SCREEN ================= -->
+        <div id="page-dashboard" class="page">
+            <div class="dashboard-grid">
+                
+                <!-- Hero section -->
+                <div class="dashboard-hero glass">
+                    <div class="hero-text">
+                        <h1>Namaste, <span id="dash-username">Learner</span>!</h1>
+                        <p style="color: var(--text-secondary); font-size: 1.1rem; margin-top: 0.25rem;">
+                            Your Indian Sign Language learning arena is ready. Keep up the momentum!
+                        </p>
+                    </div>
+
+                </div>
+
+                <!-- Full-Width Column: Lessons list -->
+                <div style="grid-column: 1 / -1;">
+                    <h2 class="lessons-section-header">Structured INCLUDE Curriculum</h2>
+                    <div class="lessons-list" id="dashboard-lessons-container">
+                        <!-- Lessons populated dynamically -->
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <!-- ================= DICTIONARY SCREEN ================= -->
+        <div id="page-dictionary" class="page">
+            <div style="margin-bottom: 2rem;">
+                <h1 style="font-size: 2rem; margin-bottom: 0.5rem;">Indian Sign Language Dictionary</h1>
+                <p style="color: var(--text-secondary);">Browse the 15 categories from the AI4Bharat INCLUDE dataset.</p>
+            </div>
+            
+            <div class="dictionary-controls">
+                <div class="form-group" style="margin: 0; min-width: 250px;">
+                    <label for="dict-category-select">Filter by Category</label>
+                    <select id="dict-category-select" class="form-input" onchange="loadDictionary()" style="background: var(--bg-card); cursor: pointer;">
+                        <option value="">All Categories (263 Signs)</option>
+                        <option value="Greetings">Greetings</option>
+                        <option value="Pronouns">Pronouns</option>
+                        <option value="Colours">Colours</option>
+                        <option value="Seasons">Seasons</option>
+                        <option value="Days and Time">Days and Time</option>
+                        <option value="Animals">Animals</option>
+                        <option value="Clothes">Clothes</option>
+                        <option value="Places">Places</option>
+                        <option value="Jobs">Jobs</option>
+                        <option value="Transportation">Transportation</option>
+                        <option value="Home">Home</option>
+                        <option value="People">People</option>
+                        <option value="Adjectives">Adjectives</option>
+                        <option value="Society">Society</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="dict-grid" id="dictionary-container">
+                <!-- Word cards populated dynamically -->
+            </div>
+        </div>
+
+
+
+        <!-- ================= PRACTICE ARENA WORKSPACE ================= -->
+        <div id="page-practice" class="page">
+            <div class="arena-header">
+                <div class="arena-title">
+                    <button class="btn btn-secondary" onclick="switchPage('dashboard')" style="padding: 0.5rem 1rem; width: auto;">
+                        ← Back
+                    </button>
+                    <div>
+                        <div id="practice-lesson-title" style="font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px;">LESSON PATHWAY</div>
+                        <h1 id="practice-sign-name" style="font-size: 2rem; text-transform: capitalize;">Sign Name</h1>
+                    </div>
+                </div>
+                <div id="practice-sign-desc" style="max-width: 50%; text-align: right; color: var(--text-secondary); font-size: 0.95rem;">
+                    Sign description and tips.
+                </div>
+            </div>
+
+            <!-- Mannequin and Webcam Viewports -->
+            <div class="arena-grid">
+                
+                <!-- Left: Reference Video Player -->
+                <div class="window-container">
+                    <div class="overlay-label">📹 REFERENCE VIDEO PLAYER</div>
+                    
+                    <div id="video-viewport-container" style="position: relative; width: 100%; height: 400px; background: #000; overflow: hidden; border-radius: 12px; border: 1px solid var(--border-color);">
+                        <video id="practice-ref-video" style="width: 100%; height: 100%; object-fit: contain; display: none;" loop playsinline></video>
+                        <div id="video-placeholder" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: var(--text-secondary); width: 80%;">
+                            <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">📹</div>
+                            <div id="video-placeholder-text">Please place the raw video file at: <br><code style="color:#ef4444;">app/static/videos/{sign}.mp4</code> (or <code>.MOV</code>) to play.</div>
+                        </div>
+                    </div>
+                    
+                    <div class="overlay-controls" style="display: flex; gap: 0.5rem; align-items: center; justify-content: space-between; width: 100%;">
+                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                            <button id="btn-video-play-pause" onclick="toggleVideoPlay()">Play/Pause</button>
+                            <div class="speed-control" style="display: inline-block;">
+                                <select id="video-speed-select" onchange="changeVideoSpeed(this.value)" style="background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border-color); border-radius: 4px; padding: 0.3rem 0.5rem;">
+                                    <option value="1">1.0x Speed</option>
+                                    <option value="0.25">0.25x Slow-mo</option>
+                                    <option value="0.5">0.5x Slow-mo</option>
+                                    <option value="1.5">1.5x Speed</option>
+                                    <option value="2">2.0x Fast</option>
+                                </select>
+                            </div>
+                        </div>
+                        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.9rem; user-select: none;">
+                            <input type="checkbox" id="toggle-disable-video" onchange="handleVideoToggle(this.checked)" style="cursor: pointer; width: 16px; height: 16px; accent-color: var(--teal);">
+                            Show Sign
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Right: Live AI Coach Camera -->
+                <div class="window-container">
+                    <div class="overlay-label">📹 REAL-TIME AI COACH</div>
+                    
+                    <!-- Raw Webcam stream (hidden) -->
+                    <video id="webcam-raw" autoplay playsinline></video>
+                    <!-- MediaPipe Landmarks rendered canvas -->
+                    <canvas id="webcam-canvas"></canvas>
+                    
+                    <div class="overlay-controls">
+                        <button id="btn-toggle-camera" onclick="toggleWebcam()">Start Camera</button>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Intelligent AI Coach feedback stats panel -->
+            <div class="glass coach-panel">
+                <div class="coach-status-container">
+                    
+                    <div class="accuracy-gauge">
+                        <div class="accuracy-score" id="coach-score-display">--%</div>
+                        <div class="accuracy-label">Similarity</div>
+                    </div>
+                    
+                    <div style="width: 1px; height: 50px; background: var(--border-color);"></div>
+                    
+                    <div class="feedback-text-box">
+                        <div class="feedback-headline" id="coach-feedback-header">
+                            <span>💡 Smart Coach:</span>
+                            <span id="coach-feedback-status" style="color: var(--text-secondary); font-size: 0.9rem;">Initializing...</span>
+                        </div>
+                        <div class="feedback-message" id="coach-feedback-message">
+                            Start your camera and replicate the sign movements demonstrated by the video on the left. The coach will analyze your shoulder, elbow, wrist, and finger positions.
+                        </div>
+                    </div>
+
+                    <div style="width: 1px; height: 50px; background: var(--border-color);"></div>
+
+                    <div>
+                        <button class="btn btn-primary" id="btn-complete-sign" onclick="submitPracticeScore()" style="width: auto; padding: 0.85rem 2rem;">
+                            Finish Session
+                        </button>
+                    </div>
+                    
+                </div>
+            </div>
+            
+        </div>
+
+    </main>
+
+    <!-- Global Alert Popup -->
+    <div id="global-alert" class="alert-popup">Alert text</div>
+
+    <!-- Application scripts -->
+    <script src="app.js?v=25"></script>
+    <script src="coach.js?v=25"></script>
+</body>
+</html>

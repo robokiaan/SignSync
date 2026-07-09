@@ -4,13 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SignSync ISL - Learn Indian Sign Language with AI</title>
-    <link rel="stylesheet" href="styles.css?v=25">
-    
-    <!-- CDNs for MediaPipe and TF.js -->
+    <link rel="stylesheet" href="styles.css?v=28">
+
+    <!-- MediaPipe Holistic + camera utilities -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
 
@@ -28,69 +26,9 @@
 
     <!-- App Container -->
     <main>
-        
-        <!-- ================= AUTH: LOGIN SCREEN ================= -->
-        <div id="page-login" class="page active">
-            <div class="auth-container glass">
-                <div class="auth-header">
-                    <div class="logo" style="justify-content: center; margin-bottom: 1rem;">
-                        <div class="logo-icon">🫱🏽</div>
-                        <span>SignSync ISL</span>
-                    </div>
-                    <h2>Welcome Back</h2>
-                    <p>Enter your credentials to continue learning</p>
-                </div>
-                <form id="login-form" onsubmit="handleLogin(event)">
-                    <div class="form-group">
-                        <label for="login-username">Username or Email</label>
-                        <input type="text" id="login-username" class="form-input" required placeholder="e.g. learner">
-                    </div>
-                    <div class="form-group">
-                        <label for="login-password">Password</label>
-                        <input type="password" id="login-password" class="form-input" required placeholder="••••••••">
-                    </div>
-                    <button type="submit" class="btn btn-primary">Log In</button>
-                </form>
-                <div class="auth-footer">
-                    Don't have an account? <a href="#" onclick="switchAuthPage('register')">Sign Up</a>
-                </div>
-            </div>
-        </div>
-
-        <!-- ================= AUTH: REGISTER SCREEN ================= -->
-        <div id="page-register" class="page">
-            <div class="auth-container glass">
-                <div class="auth-header">
-                    <div class="logo" style="justify-content: center; margin-bottom: 1rem;">
-                        <div class="logo-icon">🫱🏽</div>
-                        <span>SignSync ISL</span>
-                    </div>
-                    <h2>Create Account</h2>
-                    <p>Start your Indian Sign Language journey today</p>
-                </div>
-                <form id="register-form" onsubmit="handleRegister(event)">
-                    <div class="form-group">
-                        <label for="register-username">Username</label>
-                        <input type="text" id="register-username" class="form-input" required minlength="3" placeholder="learner">
-                    </div>
-                    <div class="form-group">
-                        <label for="register-email">Email Address</label>
-                        <input type="email" id="register-email" class="form-input" required placeholder="learner@example.com">
-                    </div>
-                    <div class="form-group">
-                        <label for="register-password">Password</label>
-                        <input type="password" id="register-password" class="form-input" required minlength="6" placeholder="••••••••">
-                    </div>
-                    <button type="submit" class="btn btn-primary">Create Account</button>
-                </form>
-                <div class="auth-footer">
-                    Already have an account? <a href="#" onclick="switchAuthPage('login')">Log In</a>
-                </div>
-            </div>
-        </div>
 
         <!-- ================= DASHBOARD SCREEN ================= -->
-        <div id="page-dashboard" class="page">
+        <div id="page-dashboard" class="page active">
             <div class="dashboard-grid">
                 
                 <!-- Hero section -->
@@ -126,7 +64,7 @@
                 <div class="form-group" style="margin: 0; min-width: 250px;">
                     <label for="dict-category-select">Filter by Category</label>
                     <select id="dict-category-select" class="form-input" onchange="loadDictionary()" style="background: var(--bg-card); cursor: pointer;">
-                        <option value="">All Categories (263 Signs)</option>
+                        <option value="">All Categories (262 Signs)</option>
                         <option value="Greetings">Greetings</option>
                         <option value="Pronouns">Pronouns</option>
                         <option value="Colours">Colours</option>
@@ -141,6 +79,7 @@
                         <option value="People">People</option>
                         <option value="Adjectives">Adjectives</option>
                         <option value="Society">Society</option>
+                        <option value="General">General</option>
                     </select>
                 </div>
             </div>
@@ -244,7 +183,7 @@
                     <div style="width: 1px; height: 50px; background: var(--border-color);"></div>
 
                     <div>
-                        <button class="btn btn-primary" id="btn-complete-sign" onclick="submitPracticeScore()" style="width: auto; padding: 0.85rem 2rem;">
+                        <button class="btn btn-primary" id="btn-complete-sign" onclick="finishSession()" style="width: auto; padding: 0.85rem 2rem;">
                             Finish Session
                         </button>
                     </div>
@@ -260,7 +199,7 @@
     <div id="global-alert" class="alert-popup">Alert text</div>
 
     <!-- Application scripts -->
-    <script src="app.js?v=25"></script>
-    <script src="coach.js?v=25"></script>
+    <script src="app.js?v=28"></script>
+    <script src="coach.js?v=28"></script>
 </body>
 </html>

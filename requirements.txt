@@ -1,11 +1,10 @@
+# Web API + server
 fastapi
 uvicorn
 sqlalchemy
-passlib[bcrypt]
-python-jose[cryptography]
 pydantic
-python-multipart
+
+# Reference-feature precompute pipeline (scripts/precompute_refs.py)
 numpy
 opencv-python
 mediapipe
-email-validator

@@ -4,7 +4,8 @@
 // `holisticMode`:
 //   'ref'  - priming: run the reference video through the model once to build
 //            the reference feature sequence (then cached per sign).
-//   'user' - coaching: run the live webcam and score the learner via DTW.
+//   'user' - coaching: run the live webcam and score the learner against the
+//            reference's Movement-Hold phase model.
 // This replaces the old design that ran a second Holistic model on the
 // reference video every session (and accumulated frames across <video loop>).
 
@@ -14,23 +15,49 @@ let cameraHelper = null;
 
 let isWebcamActive = false;
 
-// Sustained-scoring + smoothing state (reset per sign in resetDTWSequences)
-let smoothedScore = null;      // EMA of the instantaneous score (not a running max)
+// ---------------------------------------------------------------------------
+// Movement-Hold phase scoring
+// ---------------------------------------------------------------------------
+// A sign is modeled as an ordered sequence of HOLDS (informative target poses)
+// linked by MOVES (transitions with a dominant direction). The reference is
+// auto-segmented into this model at prime time from its motion profile. The
+// learner is graded by how well they hit each hold pose, in order (+ a light
+// check that the moves go the right way). Because holds are the target, holding
+// a pose no longer collapses the score, and feedback is per-phase.
+const HOLD_MATCH_THRESHOLD = 0.50; // masked distance at which a hold's quality hits 0
+const HOLD_COMPLETE_Q = 0.55;      // quality above which a phase counts as "reached"
+const REF_MOTION_HOLD_FRAC = 0.45; // ref frame is a hold if motion < this fraction of the sign's peak motion
+const REF_MIN_HOLD_MOTION = 0.025; // absolute floor for the hold-motion threshold
+const PHASE_MERGE_DIST = 0.10;     // merge consecutive ref holds whose targets are closer than this
+const MOVE_WEIGHT = 0.20;          // how much movement-direction agreement modulates a phase's credit
+// Feature indices that carry hand position/orientation (used for move direction).
+const POSITION_DIMS = [5, 6, 7, 14, 15, 16, 22, 23, 24, 25];
+
+// Per-attempt scoring state (reset in resetDTWSequences)
+let activePhaseModel = null;   // { holds, moveDirs, holdTimes, requires }
+let phaseBest = [];            // best hold quality achieved per phase this attempt
+let phaseReached = [];         // has each phase been hit at least at HOLD_COMPLETE_Q?
+let phaseUserPose = [];        // user feature vector captured when each phase was reached
+let curPhase = 0;              // phase the learner is currently working toward
+let leftFinalPose = false;     // has the learner moved off the final pose (guards attempt restart)?
+let missingLimbFrames = 0;     // consecutive frames missing a required limb (debounces the prompt)
+let lastDisplayScore = 0;      // last score shown (kept while prompting for limbs)
 let prevUserSmoothed = null;   // last smoothed user frame, for feature EMA
-let refUsesRight = false;      // does the reference sign actually use each hand?
-let refUsesLeft = false;
+
+let coachDebug = true;         // show the live scoring breakdown panel
 
 let canvasElement, canvasCtx;
 
-// DTW sequence buffers + reference cache
+// Reference sequence buffers + caches
 let refSequence = [];
-let userSequence = [];
 const refCache = {};           // signName -> reference feature sequence (in-memory)
+const phaseCache = {};         // signName -> phase model
 let holisticMode = "idle";     // 'idle' | 'ref' | 'user'
 let refReadyPromise = Promise.resolve();
 let activePrimeId = 0;         // guards against overlapping reference primings
 
-const SAMPLE_FPS = 5; // reference sampling rate; matches the live user throttle (200ms)
+const SAMPLE_FPS = 5;           // reference sampling rate (holds are matched per-frame, so the live rate can be higher)
+const USER_THROTTLE_MS = 100;   // live webcam MediaPipe interval; lower = snappier score (send() is serialized, so no backup)
 
 const MEDIAPIPE_OPTIONS = {
     modelComplexity: 1,
@@ -82,7 +109,7 @@ async function primeReference(signName) {
 
     if (refCache[signName]) {
         refSequence = refCache[signName];
-        computeRefHandUsage();
+        activatePhaseModel(signName);
         return;
     }
 
@@ -106,26 +133,30 @@ async function primeReference(signName) {
 
     if (myId === activePrimeId) {
         refCache[signName] = refSequence.slice();
-        computeRefHandUsage();
+        phaseCache[signName] = buildPhaseModel(refSequence);
+        activatePhaseModel(signName);
         // Return the video to a clean looping state for the learner to watch.
         video.loop = true;
         try { video.currentTime = 0; } catch (e) { /* ignore */ }
     }
 }
 
-// A hand "counts" for a sign if it's detected in a meaningful fraction of the
-// reference frames. Used to penalize the learner for omitting a required hand.
-function computeRefHandUsage() {
-    refUsesRight = false;
-    refUsesLeft = false;
-    if (!refSequence.length) return;
-    let r = 0, l = 0;
-    for (const f of refSequence) {
-        if (f.visibility.rightHand) r++;
-        if (f.visibility.leftHand) l++;
-    }
-    refUsesRight = r / refSequence.length >= 0.3;
-    refUsesLeft = l / refSequence.length >= 0.3;
+// Load a sign's phase model as the active target and reset per-attempt state.
+function activatePhaseModel(signName) {
+    activePhaseModel = phaseCache[signName] || (refCache[signName] ? buildPhaseModel(refCache[signName]) : null);
+    if (activePhaseModel && !phaseCache[signName]) phaseCache[signName] = activePhaseModel;
+    resetPhaseProgress();
+}
+
+function resetPhaseProgress() {
+    const P = activePhaseModel ? activePhaseModel.holds.length : 0;
+    phaseBest = new Array(P).fill(0);
+    phaseReached = new Array(P).fill(false);
+    phaseUserPose = new Array(P).fill(null);
+    curPhase = 0;
+    leftFinalPose = false;
+    missingLimbFrames = 0;
+    lastDisplayScore = 0;
 }
 
 function waitForVideoReady(video) {
@@ -216,7 +247,7 @@ async function toggleWebcam() {
             onFrame: async () => {
                 if (!isWebcamActive || holisticMode !== "user") return;
                 const now = performance.now();
-                if (now - lastProcessTime >= 200) { // throttle to 5 FPS
+                if (now - lastProcessTime >= USER_THROTTLE_MS) {
                     lastProcessTime = now;
                     await holisticModel.send({ image: videoElement });
                 }
@@ -361,6 +392,24 @@ const FEATURE_GROUPS = [
 ];
 const FEATURE_DIM = 26;
 
+// Per-feature weight in the distance. Joint angles (finger bends, elbow,
+// shoulder) are inherently invariant to camera position/zoom, so they carry the
+// score. Palm orientation and hand location still shift with camera angle even
+// after normalization, so they contribute discrimination at a lower weight
+// rather than inflating the cost when the learner is framed differently.
+const FEATURE_WEIGHTS = [
+    1, 1, 1, 1, 1,   // 0-4  right finger bends
+    0.4, 0.4, 0.2,   // 5-7  right palm normal x,y,z
+    0.5,             // 8    right finger spread
+    1, 1, 1, 1, 1,   // 9-13 left finger bends
+    0.4, 0.4, 0.2,   // 14-16 left palm normal x,y,z
+    0.5,             // 17   left finger spread
+    1, 1,            // 18-19 elbows
+    0.8, 0.8,        // 20-21 shoulders
+    0.6, 0.6,        // 22-23 right wrist location x,y (face-relative)
+    0.6, 0.6,        // 24-25 left wrist location x,y (face-relative)
+];
+
 // Per-feature coaching message, indexed to match the layout above.
 const FEATURE_FEEDBACK = (() => {
     const m = new Array(FEATURE_DIM);
@@ -413,11 +462,9 @@ function speakFeedback(text) {
 
 function resetDTWSequences() {
     refSequence = [];
-    userSequence = [];
-    smoothedScore = null;
+    activePhaseModel = null;
     prevUserSmoothed = null;
-    refUsesRight = false;
-    refUsesLeft = false;
+    resetPhaseProgress();
 }
 
 function getMaskedVectorDistance(userFrame, refFrame) {
@@ -432,27 +479,28 @@ function getMaskedVectorDistance(userFrame, refFrame) {
     const rf = refFrame.features;
 
     let sum = 0;
-    let count = 0;
+    let weightSum = 0;
     for (const g of FEATURE_GROUPS) {
         if (g.needRight && !(uVis.rightHand && rVis.rightHand)) continue;
         if (g.needLeft && !(uVis.leftHand && rVis.leftHand)) continue;
         if (g.needPose && !(uVis.pose && rVis.pose)) continue;
         for (let i = g.start; i < g.end; i++) {
             const d = uf[i] - rf[i];
-            sum += d * d;
-            count++;
+            const w = FEATURE_WEIGHTS[i];
+            sum += w * d * d;
+            weightSum += w;
         }
     }
 
-    if (count === 0) return 1.0;
-    return Math.sqrt(sum / count);
+    if (weightSum === 0) return 1.0;
+    return Math.sqrt(sum / weightSum);
 }
 
 // Light per-feature EMA on the live user stream to damp landmark jitter.
 // Resets whenever the visibility profile changes (don't blend across a hand
 // appearing/disappearing, or you'd average real values with 0.5 defaults).
 function smoothUserFrame(frame) {
-    const a = 0.5;
+    const a = 0.7; // weight on the newest frame; higher = more responsive, less lag
     if (!prevUserSmoothed || !sameVisibility(prevUserSmoothed.visibility, frame.visibility)) {
         prevUserSmoothed = { features: frame.features.slice(), visibility: frame.visibility };
         return { features: frame.features.slice(), visibility: frame.visibility };
@@ -467,149 +515,377 @@ function sameVisibility(a, b) {
 }
 
 function analyzeFeedback(results) {
-    userSequence.push(smoothUserFrame(extractFrameFeatures(results)));
+    const user = smoothUserFrame(extractFrameFeatures(results));
 
-    // Sliding window sized to the reference bounds cost/memory over a session.
-    const cap = Math.max(20, Math.ceil(refSequence.length * 1.5));
-    if (userSequence.length > cap) {
-        userSequence.splice(0, userSequence.length - cap);
-    }
-
-    if (refSequence.length < 5 || userSequence.length < 5) {
-        document.getElementById("coach-feedback-status").textContent = "Recording movement...";
-        document.getElementById("coach-feedback-message").textContent = "Keep replicating the sign movements as shown in the reference video.";
+    if (!activePhaseModel || activePhaseModel.holds.length === 0) {
+        document.getElementById("coach-feedback-status").textContent = "Analyzing reference...";
         return;
     }
 
-    const { cost, coverage } = calculateDTW(userSequence, refSequence);
+    const holds = activePhaseModel.holds;
+    const P = holds.length;
+    const need = activePhaseModel.requires;
 
-    // Base quality from the warp cost.
-    const threshold = 0.30;
-    const quality = cost < threshold ? (1 - cost / threshold) : 0; // 0..1
-
-    // Coverage gate: reward only attempts that traverse most of the reference,
-    // so a short lucky fragment (open-ended DTW) can't score high.
-    const coverageFactor = Math.min(1, coverage / 0.6);
-
-    // Hand penalty: don't give credit for omitting a hand the sign requires.
-    let userRight = 0, userLeft = 0;
-    for (const f of userSequence) {
-        if (f.visibility.rightHand) userRight++;
-        if (f.visibility.leftHand) userLeft++;
+    // Prompt (debounced) if the sign needs limbs the learner isn't showing, and
+    // freeze the score meanwhile so it can't be gamed by hiding a required hand.
+    const handsShown = (user.visibility.rightHand ? 1 : 0) + (user.visibility.leftHand ? 1 : 0);
+    const missingHands = handsShown < need.hands;
+    const missingPose = need.pose && !user.visibility.pose;
+    if (missingHands || missingPose) {
+        missingLimbFrames++;
+        if (missingLimbFrames >= 3) {
+            let msg;
+            if (missingPose) msg = "Step back so your head and upper body are in view.";
+            else if (need.hands >= 2) msg = "Show both hands to the camera for this sign.";
+            else msg = "Show your signing hand to the camera.";
+            document.getElementById("coach-feedback-status").textContent = "Show required limbs";
+            document.getElementById("coach-feedback-message").textContent = msg;
+            document.getElementById("coach-score-display").textContent = `${lastDisplayScore}%`;
+            speakFeedback(msg);
+            updateCoachDebug({ P, curPhase, q: holds.map(() => 0), displayScore: lastDisplayScore, worstIdx: -1, worstDiff: 0, prompt: msg });
+            return;
+        }
+    } else {
+        missingLimbFrames = 0;
     }
-    const userRightFrac = userRight / userSequence.length;
-    const userLeftFrac = userLeft / userSequence.length;
-    let handFactor = 1;
-    if (refUsesRight && userRightFrac < 0.3) handFactor *= 0.4;
-    if (refUsesLeft && userLeftFrac < 0.3) handFactor *= 0.4;
 
-    const instant = 100 * quality * coverageFactor * handFactor;
+    // How well the user's current pose matches each hold (mirror-aware). `um` is
+    // the user frame in whichever orientation matched, for feedback + move dir.
+    const matches = holds.map((h) => matchHold(user, h));
+    const q = matches.map((m) => m.q);
 
-    // Sustained score: EMA, so it reflects held correctness rather than a single
-    // best-ever frame (and it decays if the learner stops performing the sign).
-    smoothedScore = (smoothedScore === null) ? instant : (0.7 * smoothedScore + 0.3 * instant);
-    const displayScore = Math.round(clamp01(smoothedScore / 100) * 99);
+    // Progress on the phase currently being worked toward.
+    phaseBest[curPhase] = Math.max(phaseBest[curPhase], q[curPhase]);
+    if (q[curPhase] >= HOLD_COMPLETE_Q) {
+        phaseReached[curPhase] = true;
+        phaseUserPose[curPhase] = matches[curPhase].um.features.slice();
+    }
 
-    // Diagnostic: largest deviating joint against the DTW-aligned reference frame.
-    const userFeaturesObj = userSequence[userSequence.length - 1];
-    const matchedRefFeaturesObj = refSequence[nearestRefFrame(userFeaturesObj)];
-    let maxDiff = 0;
-    let maxDiffIdx = -1;
-    for (let k = 0; k < userFeaturesObj.features.length; k++) {
-        if (!featureVisible(k, userFeaturesObj.visibility, matchedRefFeaturesObj.visibility)) continue;
-        const diff = Math.abs(userFeaturesObj.features[k] - matchedRefFeaturesObj.features[k]);
-        if (diff > maxDiff) {
-            maxDiff = diff;
-            maxDiffIdx = k;
+    // Advance when this phase is reached and the next hold now matches at least
+    // as well (the learner has moved on to the next pose).
+    if (curPhase < P - 1 && phaseReached[curPhase] && q[curPhase + 1] >= q[curPhase] && q[curPhase + 1] > 0.2) {
+        curPhase++;
+        phaseBest[curPhase] = Math.max(phaseBest[curPhase], q[curPhase]);
+        if (q[curPhase] >= HOLD_COMPLETE_Q) {
+            phaseReached[curPhase] = true;
+            phaseUserPose[curPhase] = matches[curPhase].um.features.slice();
         }
     }
 
+    // Attempt restart: only after the learner FINISHED, then moved off the final
+    // pose, then returned to the start pose (avoids false restarts on signs whose
+    // start and end look alike).
+    if (P > 1 && phaseReached[P - 1]) {
+        if (q[P - 1] < 0.35) leftFinalPose = true;
+        if (leftFinalPose && q[0] >= HOLD_COMPLETE_Q) {
+            resetPhaseProgress();
+            phaseBest[0] = q[0];
+            phaseReached[0] = true;
+            phaseUserPose[0] = matches[0].um.features.slice();
+        }
+    }
+
+    // Score = mean over phases of (best hold quality x movement-direction credit).
+    // Completed phases keep their best (latched), so holding the final pose can't
+    // make the score collapse; unreached phases contribute 0.
+    let sum = 0;
+    for (let p = 0; p < P; p++) {
+        let contrib;
+        if (p === curPhase) contrib = Math.max(phaseBest[p], q[p]);
+        else if (phaseReached[p] || p < curPhase) contrib = phaseBest[p];
+        else contrib = 0;
+        sum += contrib * moveCredit(p);
+    }
+    const displayScore = Math.round(clamp01(sum / P) * 99);
+    lastDisplayScore = displayScore;
+
+    // Feedback focuses on the current phase (diagnose against the matched orientation).
+    const target = holds[curPhase];
+    const { idx: worstIdx, diff: worstDiff } = jointDiagnostic(matches[curPhase].um, target);
+    const done = phaseReached.every(Boolean);
     let feedback;
-    if (refUsesRight && userRightFrac < 0.3) {
-        feedback = "Use your right hand for this sign.";
-        speakFeedback(feedback);
-    } else if (refUsesLeft && userLeftFrac < 0.3) {
-        feedback = "This sign needs your left hand too.";
-        speakFeedback(feedback);
-    } else if (displayScore >= 70) {
-        feedback = "Perfect alignment! Excellent movement matching.";
-        speakFeedback("Excellent movement! Hold it steady.");
-    } else if (maxDiff > 0.18 && maxDiffIdx >= 0) {
-        feedback = FEATURE_FEEDBACK[maxDiffIdx];
-        speakFeedback(feedback);
-    } else if (displayScore >= 40) {
-        feedback = "Good motion! Keep moving in synchronization.";
-        speakFeedback("Good motion! Keep moving.");
+    if (done && displayScore >= 75) {
+        feedback = `All ${P} phase${P > 1 ? "s" : ""} matched — excellent!`;
+        speakFeedback("Excellent! You matched the whole sign.");
+    } else if (q[curPhase] >= HOLD_COMPLETE_Q) {
+        feedback = P > 1 ? `Phase ${curPhase + 1}/${P} matched — move to the next pose.` : "Pose matched — hold it!";
+        speakFeedback(P > 1 ? "Good. Now the next pose." : "Pose matched.");
+    } else if (worstIdx >= 0 && worstDiff > 0.18) {
+        feedback = `Phase ${curPhase + 1}/${P}: ${FEATURE_FEEDBACK[worstIdx]}`;
+        speakFeedback(FEATURE_FEEDBACK[worstIdx]);
     } else {
-        feedback = "Replicate the sequence of movements shown in the reference sign.";
-        speakFeedback("Watch the reference and match the movement.");
+        feedback = `Move into phase ${curPhase + 1} of ${P} as shown in the reference.`;
+        speakFeedback("Match the next pose in the sign.");
     }
 
     document.getElementById("coach-feedback-status").textContent = `Score: ${displayScore}%`;
     document.getElementById("coach-feedback-message").textContent = feedback;
     document.getElementById("coach-score-display").textContent = `${displayScore}%`;
+
+    updateCoachDebug({ P, curPhase, q, displayScore, worstIdx, worstDiff });
 }
 
-function nearestRefFrame(userFrame) {
-    let bestIdx = 0;
-    let minDist = Infinity;
-    for (let i = 0; i < refSequence.length; i++) {
-        const d = getMaskedVectorDistance(userFrame, refSequence[i]);
-        if (d < minDist) {
-            minDist = d;
-            bestIdx = i;
-        }
+// Match of a user frame to a hold target pose, considering BOTH orientations so
+// scoring is robust to the mirrored selfie view (and to learners who mirror the
+// sign / use their non-dominant hand). Returns the quality (0..1) and the user
+// frame in whichever orientation matched better (for feedback + move direction).
+function matchHold(user, hold) {
+    const dDirect = getMaskedVectorDistance(user, hold);
+    const mUser = mirrorFrame(user);
+    const dMirror = getMaskedVectorDistance(mUser, hold);
+    if (dMirror < dDirect) {
+        return { q: clamp01(1 - dMirror / HOLD_MATCH_THRESHOLD), um: mUser };
     }
-    return bestIdx;
+    return { q: clamp01(1 - dDirect / HOLD_MATCH_THRESHOLD), um: user };
 }
 
-// Subsequence DTW (open-ended start AND end): the user sequence may align to any
-// contiguous window of the reference. Returns the normalized warp cost plus the
-// coverage = fraction of the reference spanned by the optimal alignment path
-// (recovered by backtracking), which the scorer uses to reject partial attempts.
-function calculateDTW(seq1, seq2) {
-    const n = seq1.length;
-    const m = seq2.length;
-    if (n === 0 || m === 0) return { cost: Infinity, coverage: 0 };
+function holdQuality(user, hold) {
+    return matchHold(user, hold).q;
+}
 
-    const D = Array.from({ length: n }, () => new Float64Array(m));
-    const P = Array.from({ length: n }, () => new Int8Array(m)); // 0=diag, 1=up, 2=left
+// Left-right mirror of a frame: swap the hand blocks, swap elbows/shoulders, and
+// flip the x of every horizontal feature (palm-normal x, wrist-location x).
+function mirrorFrame(frame) {
+    const f = frame.features;
+    const m = f.slice();
+    for (let i = 0; i < 9; i++) { m[i] = f[9 + i]; m[9 + i] = f[i]; }     // right<->left hand blocks
+    m[5] = 1 - m[5]; m[14] = 1 - m[14];                                     // palm-normal x (post-swap)
+    m[18] = f[19]; m[19] = f[18];                                           // elbows
+    m[20] = f[21]; m[21] = f[20];                                           // shoulders
+    m[22] = 1 - f[24]; m[23] = f[25]; m[24] = 1 - f[22]; m[25] = f[23];     // wrist location (swap + flip x)
+    return {
+        features: m,
+        visibility: { rightHand: frame.visibility.leftHand, leftHand: frame.visibility.rightHand, pose: frame.visibility.pose },
+    };
+}
 
-    for (let j = 0; j < m; j++) {
-        D[0][j] = getMaskedVectorDistance(seq1[0], seq2[j]); // open start: any column, no penalty
+// Credit (<=1) for having moved INTO phase p in the reference's direction.
+function moveCredit(p) {
+    if (p === 0 || !activePhaseModel) return 1;
+    const dir = activePhaseModel.moveDirs[p];
+    if (!dir) return 1;
+    const a = phaseUserPose[p - 1];
+    const b = phaseUserPose[p];
+    if (!a || !b) return 1;
+    const cos = cosineSim(positionDelta(a, b), dir);
+    return (1 - MOVE_WEIGHT) + MOVE_WEIGHT * clamp01(cos);
+}
+
+function jointDiagnostic(user, target) {
+    let maxDiff = 0, idx = -1;
+    for (let k = 0; k < FEATURE_DIM; k++) {
+        if (!featureVisible(k, user.visibility, target.visibility)) continue;
+        const d = Math.abs(user.features[k] - target.features[k]);
+        if (d > maxDiff) { maxDiff = d; idx = k; }
     }
-    for (let i = 1; i < n; i++) {
-        D[i][0] = getMaskedVectorDistance(seq1[i], seq2[0]) + D[i - 1][0];
-        P[i][0] = 1;
-        for (let j = 1; j < m; j++) {
-            const cost = getMaskedVectorDistance(seq1[i], seq2[j]);
-            const diag = D[i - 1][j - 1], up = D[i - 1][j], left = D[i][j - 1];
-            let best = diag, p = 0;
-            if (up < best) { best = up; p = 1; }
-            if (left < best) { best = left; p = 2; }
-            D[i][j] = cost + best;
-            P[i][j] = p;
+    return { idx, diff: maxDiff };
+}
+
+function setCoachDebug(on) {
+    coachDebug = on;
+    const el = document.getElementById("coach-debug");
+    if (el && !on) el.style.display = "none";
+}
+
+// [TEMP/DEBUG] Render the reference frame at each detected phase (hold) so the
+// segmentation can be eyeballed. Seeks the ref video to each hold's timestamp
+// and captures a thumbnail. Triggered by the "Show Phase Frames" button.
+async function showPhaseFrames() {
+    const gallery = document.getElementById("phase-frames");
+    if (!gallery) return;
+    gallery.style.display = "flex";
+
+    const signName = (typeof activeSign !== "undefined" && activeSign) ? activeSign.sign_name.toLowerCase() : null;
+    const model = signName && phaseCache[signName];
+    if (!model || !model.holdTimes || !model.holdTimes.length) {
+        gallery.innerHTML = `<span style="color:var(--text-secondary)">No phase model yet — open a sign and let the reference finish analyzing.</span>`;
+        return;
+    }
+    const video = document.getElementById("practice-ref-video");
+    if (!video || !video.duration) {
+        gallery.innerHTML = `<span style="color:var(--text-secondary)">Reference video not ready.</span>`;
+        return;
+    }
+
+    const wasPaused = video.paused, wasLoop = video.loop, t0 = video.currentTime;
+    video.pause();
+    video.loop = false;
+    gallery.innerHTML = `<span style="color:var(--text-secondary)">Capturing ${model.holdTimes.length} phase(s)…</span>`;
+
+    const cnv = document.createElement("canvas");
+    cnv.width = 160; cnv.height = 120;
+    const ctx = cnv.getContext("2d");
+    const figs = [];
+    for (let i = 0; i < model.holdTimes.length; i++) {
+        const t = Math.min(Math.max(model.holdTimes[i], 0), video.duration - 0.01);
+        await seekVideo(video, t);
+        ctx.drawImage(video, 0, 0, cnv.width, cnv.height);
+        const need = model.requires;
+        figs.push(`<div style="text-align:center;font-size:0.72rem;color:var(--text-secondary);">
+            <img src="${cnv.toDataURL("image/jpeg", 0.7)}" style="width:160px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border-color);">
+            <div style="margin-top:0.25rem;">Phase ${i + 1}/${model.holdTimes.length} · t=${t.toFixed(2)}s</div>
+        </div>`);
+        if (i === 0) figs.unshift(`<div style="align-self:center;font-size:0.72rem;color:var(--text-secondary);padding-right:0.5rem;">needs ${need.hands} hand(s)${need.pose ? " + body" : ""}:</div>`);
+    }
+    gallery.innerHTML = figs.join("");
+
+    video.loop = wasLoop;
+    try { video.currentTime = t0; } catch (e) { /* ignore */ }
+    if (!wasPaused) video.play().catch(() => {});
+}
+
+// Live scoring breakdown so calibration can be data-driven against a real camera.
+function updateCoachDebug(d) {
+    const el = document.getElementById("coach-debug");
+    if (!el) return;
+    if (!coachDebug) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    const qs = d.q.map((x) => x.toFixed(2)).join(",");
+    const bests = phaseBest.map((x) => x.toFixed(2)).join(",");
+    const reached = phaseReached.map((x) => (x ? "✓" : "·")).join("");
+    const worst = d.worstIdx >= 0 ? `${d.worstIdx} Δ${d.worstDiff.toFixed(2)}` : "none";
+    el.textContent =
+        `phases ${d.P} | on ${d.curPhase + 1}/${d.P} | q[${qs}] | best[${bests}] | reached ${reached} | ` +
+        `score ${d.displayScore}% | worst joint: ${worst}`;
+}
+
+// ---------------------------------------------------------------------------
+// Reference phase model: auto-segment a reference sequence into an ordered list
+// of HOLD target poses (low-motion runs) joined by MOVES (with a direction),
+// using the Movement-Hold structure of the sign.
+// ---------------------------------------------------------------------------
+function buildPhaseModel(seq) {
+    const n = seq.length;
+    const dt = 1 / SAMPLE_FPS; // seconds per reference frame (seeking step)
+    const pack = (holds, moveDirs, times) => ({ holds, moveDirs, holdTimes: times, requires: requiredLimbs(seq, holds) });
+    if (n === 0) return pack([], [], []);
+    if (n <= 2) return pack([avgFrames(seq)], [null], [((n - 1) / 2) * dt]);
+
+    // Motion between consecutive frames.
+    const motion = [];
+    for (let i = 1; i < n; i++) motion.push(frameDistance(seq[i], seq[i - 1]));
+    const maxM = Math.max(...motion);
+    const thr = Math.max(REF_MIN_HOLD_MOTION, maxM * REF_MOTION_HOLD_FRAC);
+
+    // A HOLD is a run of consecutive LOW-motion gaps (a sustained pose); the
+    // high-motion gaps separating them are the MOVES (transitions we don't score).
+    // Each hold run over gaps [start..g-1] connects frames [start..g].
+    let segs = [];
+    let g = 0;
+    while (g < motion.length) {
+        if (motion[g] < thr) {
+            const start = g;
+            while (g < motion.length && motion[g] < thr) g++;
+            segs.push({ pose: avgFrames(seq.slice(start, g + 1)), start, end: g });
+        } else {
+            g++;
+        }
+    }
+    // Fall back to endpoint poses if nothing segmented cleanly.
+    if (segs.length === 0) {
+        segs = [
+            { pose: avgFrames(seq.slice(0, Math.min(2, n))), start: 0, end: Math.min(1, n - 1) },
+            { pose: avgFrames(seq.slice(Math.max(0, n - 2))), start: Math.max(0, n - 2), end: n - 1 },
+        ];
+    }
+
+    // Merge consecutive holds whose target poses are nearly identical.
+    const merged = [segs[0]];
+    for (let k = 1; k < segs.length; k++) {
+        const prev = merged[merged.length - 1];
+        if (frameDistance(segs[k].pose, prev.pose) < PHASE_MERGE_DIST) {
+            merged[merged.length - 1] = { pose: avgFrames([prev.pose, segs[k].pose]), start: prev.start, end: segs[k].end };
+        } else {
+            merged.push(segs[k]);
         }
     }
 
-    // Open end: minimum over the final user row.
-    let endJ = 0, minCost = Infinity;
-    for (let j = 0; j < m; j++) {
-        if (D[n - 1][j] < minCost) { minCost = D[n - 1][j]; endJ = j; }
-    }
+    const holds = merged.map((m) => m.pose);
+    const times = merged.map((m) => ((m.start + m.end) / 2) * dt);
 
-    // Backtrack to find the reference span the path covers.
-    let i = n - 1, j = endJ, minJ = endJ, maxJ = endJ;
-    while (i > 0) {
-        const p = P[i][j];
-        if (p === 0) { i--; j--; }
-        else if (p === 1) { i--; }
-        else { j--; }
-        if (j < minJ) minJ = j;
-        if (j > maxJ) maxJ = j;
-    }
+    // Dominant movement direction into each hold (over position/orientation dims).
+    const moveDirs = holds.map((h, p) => {
+        if (p === 0) return null;
+        const dir = positionDelta(holds[p - 1].features, holds[p].features);
+        const mag = Math.sqrt(dir.reduce((s, v) => s + v * v, 0));
+        if (mag < 0.08) return null; // negligible move -> no direction constraint
+        return dir.map((v) => v / mag);
+    });
 
-    return { cost: minCost / n, coverage: (maxJ - minJ + 1) / m };
+    return pack(holds, moveDirs, times);
+}
+
+// What the sign needs the learner to show. A hand counts as REQUIRED only if it
+// is actually used — visible in most frames AND either moving or raised into the
+// signing space — so a merely-resting hand in the reference doesn't force the
+// learner to show a second hand (the visibility != usage pitfall).
+function requiredLimbs(seq, holds) {
+    // A hand is USED if it's visible in most frames AND its WRIST either moves
+    // through space or is held up in the signing area. Wrist location is used
+    // (not finger angles) because a resting hand's low-confidence finger
+    // landmarks jitter and would falsely read as "active".
+    const handUsed = (visKey, xIdx, yIdx) => {
+        const vis = seq.filter((f) => f.visibility[visKey]);
+        if (!seq.length || vis.length / seq.length < 0.5) return false;
+        let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity, sumY = 0;
+        for (const f of vis) {
+            mnx = Math.min(mnx, f.features[xIdx]); mxx = Math.max(mxx, f.features[xIdx]);
+            mny = Math.min(mny, f.features[yIdx]); mxy = Math.max(mxy, f.features[yIdx]);
+            sumY += f.features[yIdx];
+        }
+        const locRange = Math.max(mxx - mnx, mxy - mny);
+        const meanY = sumY / vis.length;
+        return locRange >= 0.12 || meanY < 0.85; // moves in space OR raised (not resting at the bottom)
+    };
+    const hands = (handUsed("rightHand", 22, 23) ? 1 : 0) + (handUsed("leftHand", 24, 25) ? 1 : 0);
+
+    let pose = 0;
+    for (const h of holds) if (h.visibility.pose) pose++;
+    return { hands, pose: holds.length > 0 && pose * 2 >= holds.length };
+}
+
+// Average a set of frames into one representative pose (majority-vote visibility).
+function avgFrames(frames) {
+    const f = new Array(FEATURE_DIM).fill(0);
+    let r = 0, l = 0, p = 0;
+    for (const fr of frames) {
+        for (let i = 0; i < FEATURE_DIM; i++) f[i] += fr.features[i];
+        if (fr.visibility.rightHand) r++;
+        if (fr.visibility.leftHand) l++;
+        if (fr.visibility.pose) p++;
+    }
+    const c = frames.length || 1;
+    for (let i = 0; i < FEATURE_DIM; i++) f[i] /= c;
+    return { features: f, visibility: { rightHand: r * 2 >= c, leftHand: l * 2 >= c, pose: p * 2 >= c } };
+}
+
+// Weighted masked distance between two frames WITHOUT the face-only anti-cheat
+// (used for reference-side segmentation, where "no hands" just means no change).
+function frameDistance(a, b) {
+    let s = 0, w = 0;
+    for (const g of FEATURE_GROUPS) {
+        if (g.needRight && !(a.visibility.rightHand && b.visibility.rightHand)) continue;
+        if (g.needLeft && !(a.visibility.leftHand && b.visibility.leftHand)) continue;
+        if (g.needPose && !(a.visibility.pose && b.visibility.pose)) continue;
+        for (let i = g.start; i < g.end; i++) {
+            const d = a.features[i] - b.features[i];
+            const wt = FEATURE_WEIGHTS[i];
+            s += wt * d * d;
+            w += wt;
+        }
+    }
+    return w ? Math.sqrt(s / w) : 0;
+}
+
+function positionDelta(aFeat, bFeat) {
+    return POSITION_DIMS.map((i) => bFeat[i] - aFeat[i]);
+}
+
+function cosineSim(u, v) {
+    let dot = 0, mu = 0, mv = 0;
+    for (let i = 0; i < u.length; i++) { dot += u[i] * v[i]; mu += u[i] * u[i]; mv += v[i] * v[i]; }
+    if (mu === 0 || mv === 0) return 0;
+    return dot / Math.sqrt(mu * mv);
 }
 
 // ---------------------------------------------------------------------------
@@ -636,9 +912,9 @@ function extractFrameFeatures(results) {
         features.push(getPoseAngle(pose[24], pose[12], pose[14]) / 180.0); // right shoulder elevation
         features.push(getPoseAngle(pose[23], pose[11], pose[13]) / 180.0); // left shoulder elevation
         const rw = wristLocation(pose, 16);
-        features.push(rw[0], rw[1]); // right wrist x,y relative to shoulders
+        features.push(rw[0], rw[1]); // right wrist x,y relative to the face (nose)
         const lw = wristLocation(pose, 15);
-        features.push(lw[0], lw[1]); // left wrist x,y relative to shoulders
+        features.push(lw[0], lw[1]); // left wrist x,y relative to the face (nose)
     } else {
         features.push(0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5);
     }
@@ -683,15 +959,19 @@ function fingerSpread(hand) {
     return clamp01(sum / 120.0);
 }
 
-// Wrist position relative to the shoulder midpoint, scaled by shoulder width so
-// it stays scale-invariant while restoring the "location" sign parameter.
+// Wrist position relative to the FACE (nose), scaled by head width. In sign
+// language, location is defined relative to the face/head — hands at the lips,
+// forehead, cheek, chin — so anchoring here (instead of the shoulders) captures
+// the linguistic "location" parameter and stays scale/position invariant.
 function wristLocation(pose, wristIdx) {
-    const ls = pose[11], rs = pose[12], wr = pose[wristIdx];
-    const cx = (ls.x + rs.x) / 2, cy = (ls.y + rs.y) / 2;
-    const shoulderW = Math.sqrt((ls.x - rs.x) ** 2 + (ls.y - rs.y) ** 2) || 0.1;
-    const dx = (wr.x - cx) / shoulderW;
-    const dy = (wr.y - cy) / shoulderW;
-    return [clamp01((dx + 2.5) / 5), clamp01((dy + 2.5) / 5)];
+    const nose = pose[0], wr = pose[wristIdx];
+    // Anchor to the face (nose); scale by shoulder width — larger and more stable
+    // than head width, so vertical hand positions don't saturate at the clamp.
+    let scale = Math.sqrt((pose[11].x - pose[12].x) ** 2 + (pose[11].y - pose[12].y) ** 2);
+    if (scale < 0.02) scale = 0.15;
+    const dx = (wr.x - nose.x) / scale;
+    const dy = (wr.y - nose.y) / scale;
+    return [clamp01((dx + 2) / 4), clamp01((dy + 2) / 4)];
 }
 
 function vecAngleDeg(v1, v2) {

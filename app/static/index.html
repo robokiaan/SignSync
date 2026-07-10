@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SignSync ISL - Learn Indian Sign Language with AI</title>
-    <link rel="stylesheet" href="styles.css?v=28">
+    <link rel="stylesheet" href="styles.css?v=40">
 
     <!-- MediaPipe Holistic + camera utilities -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
@@ -168,7 +168,7 @@
                         <div class="accuracy-label">Similarity</div>
                     </div>
                     
-                    <div style="width: 1px; height: 50px; background: var(--border-color);"></div>
+                    <div class="coach-divider" style="width: 1px; height: 50px; background: var(--border-color);"></div>
                     
                     <div class="feedback-text-box">
                         <div class="feedback-headline" id="coach-feedback-header">
@@ -180,7 +180,7 @@
                         </div>
                     </div>
 
-                    <div style="width: 1px; height: 50px; background: var(--border-color);"></div>
+                    <div class="coach-divider" style="width: 1px; height: 50px; background: var(--border-color);"></div>
 
                     <div>
                         <button class="btn btn-primary" id="btn-complete-sign" onclick="finishSession()" style="width: auto; padding: 0.85rem 2rem;">
@@ -190,7 +190,26 @@
                     
                 </div>
             </div>
-            
+
+            <!-- Live scoring breakdown (for calibration; toggle with the checkbox) -->
+            <div style="display:flex; align-items:center; gap:0.75rem; margin-top:0.75rem;">
+                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; font-size:0.8rem; color:var(--text-secondary); user-select:none;">
+                    <input type="checkbox" id="toggle-coach-debug" checked onchange="setCoachDebug(this.checked)" style="cursor:pointer;">
+                    🐞 Debug
+                </label>
+                <div id="coach-debug" style="flex:1; font-family:monospace; font-size:0.75rem; color:var(--text-secondary); background:rgba(0,0,0,0.25); border:1px solid var(--border-color); border-radius:6px; padding:0.4rem 0.6rem; overflow-x:auto; white-space:nowrap;">
+                    Start the camera and perform the sign — the live score breakdown will appear here.
+                </div>
+            </div>
+
+            <!-- [TEMP] Inspect the auto-detected phase (hold) frames for this sign -->
+            <div style="margin-top:0.75rem;">
+                <button class="btn btn-secondary" onclick="showPhaseFrames()" style="width:auto; padding:0.4rem 0.9rem; font-size:0.85rem;">
+                    🎞 Show Phase Frames
+                </button>
+                <div id="phase-frames" style="display:none; flex-wrap:wrap; gap:0.75rem; margin-top:0.75rem; align-items:flex-start;"></div>
+            </div>
+
         </div>
 
     </main>
@@ -199,7 +218,7 @@
     <div id="global-alert" class="alert-popup">Alert text</div>
 
     <!-- Application scripts -->
-    <script src="app.js?v=28"></script>
-    <script src="coach.js?v=28"></script>
+    <script src="app.js?v=40"></script>
+    <script src="coach.js?v=40"></script>
 </body>
 </html>

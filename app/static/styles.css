@@ -686,3 +686,69 @@ select option {
     background-color: #0f172a;
     color: var(--text-primary);
 }
+
+/* ===================================================================
+   Responsive layout — tablets and phones
+   =================================================================== */
+@media (max-width: 768px) {
+    main { padding: 1.5rem; }
+
+    /* Practice arena header stacks; description goes full width */
+    .arena-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+    #practice-sign-desc {
+        max-width: 100% !important;
+        text-align: left !important;
+    }
+
+    /* Reference window fills its (aspect-ratio-sized) box instead of a fixed 400px */
+    #video-viewport-container { height: 100% !important; }
+
+    /* Coach panel: stack the gauge / feedback / button vertically */
+    .coach-status-container {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 1rem;
+        text-align: center;
+    }
+    .coach-divider { display: none !important; }
+    .accuracy-gauge { min-width: 0; }
+    .feedback-headline { justify-content: center; }
+    #btn-complete-sign { width: 100% !important; }
+}
+
+@media (max-width: 480px) {
+    header { padding: 1rem; }
+    .logo { font-size: 1.2rem; }
+    .logo-icon { width: 1.6rem; height: 1.6rem; }
+    nav { gap: 0.25rem; }
+    nav button { padding: 0.4rem 0.6rem; font-size: 0.85rem; }
+
+    main { padding: 1rem; }
+
+    .dashboard-hero { padding: 1.5rem; }
+    .hero-text h1 { font-size: 1.7rem; }
+    .dashboard-hero p { font-size: 0.95rem !important; }
+    .lessons-section-header { font-size: 1.1rem; }
+    .lesson-card { padding: 1.15rem; }
+
+    #practice-sign-name { font-size: 1.4rem !important; }
+    .arena-grid { gap: 1rem; }
+
+    .coach-panel { padding: 1.15rem; }
+    .accuracy-score { font-size: 2.4rem; }
+
+    .dictionary-controls { flex-direction: column; }
+    .dict-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 1rem; }
+    .dict-card { padding: 1.15rem; }
+    .dict-card h3 { font-size: 1.1rem; }
+    .dict-card p { min-height: 0; }
+
+    /* Phase-frame thumbnails shrink to fit two-up on a phone */
+    #phase-frames img { width: 130px !important; height: 98px !important; }
+
+    .alert-popup { left: 1rem; right: 1rem; bottom: 1rem; text-align: center; }
+}

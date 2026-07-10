@@ -1,0 +1,13 @@
+# Render Blueprint — deploys the FastAPI backend + static frontend.
+# On Render: New > Blueprint > pick this repo. It auto-deploys on every push.
+# (Portable: the start command below also works on Railway, Fly.io, etc.)
+services:
+  - type: web
+    name: signsync-isl
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"

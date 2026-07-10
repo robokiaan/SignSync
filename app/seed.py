@@ -42,11 +42,20 @@ def seed_db():
 
     db = SessionLocal()
     try:
+        # Sign list: prefer the local video files; fall back to the committed
+        # manifest (app/signs.json) so the app can seed on a host where the large
+        # video folder isn't deployed.
         videos_dir = os.path.join(os.path.dirname(__file__), "static", "videos")
-        print(f"Loading video files from: {videos_dir}")
         video_files = []
         if os.path.exists(videos_dir):
             video_files = [f[:-4] for f in os.listdir(videos_dir) if f.lower().endswith(".mp4")]
+        if not video_files:
+            manifest = os.path.join(os.path.dirname(__file__), "signs.json")
+            if os.path.exists(manifest):
+                import json
+                with open(manifest, "r", encoding="utf-8") as f:
+                    video_files = json.load(f)
+                print(f"No local videos; seeding from manifest {manifest}")
         print(f"Found {len(video_files)} signs to seed.")
 
         # Seed Sign Dictionary

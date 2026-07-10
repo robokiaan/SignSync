@@ -4,7 +4,7 @@ from fastapi import FastAPI, Depends, HTTPException, Body
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session, selectinload
 
-from app.database import get_db
+from app.database import get_db, Base, engine, SessionLocal
 from app.models import SignDictionary, Lesson, LessonItem
 from app import schemas
 
@@ -13,6 +13,21 @@ app = FastAPI(
     description="Backend API for the SignSync Indian Sign Language learning platform",
     version="1.0.0"
 )
+
+
+@app.on_event("startup")
+def seed_if_empty():
+    """Ensure tables exist and the dictionary is populated. Lets the app boot
+    with data on a fresh host (where the DB is not committed and the filesystem
+    may be ephemeral) without a separate seed step."""
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        if db.query(SignDictionary).count() == 0:
+            from app.seed import seed_db
+            seed_db()
+    finally:
+        db.close()
 
 
 # LESSONS ROUTE: Get All

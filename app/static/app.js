@@ -2,6 +2,12 @@
 let activePage = "dashboard";
 let activeSign = null;
 
+// Where the reference .mp4 files are served from. Default: same origin (/videos).
+// To host the ~1.3 GB video set off the app server (e.g. Cloudflare R2 / S3),
+// set this to that bucket's base URL — it MUST send CORS headers, because the
+// phase model draws each frame to a canvas (cross-origin video would taint it).
+const VIDEO_BASE_URL = "/videos";
+
 // Initialize App -> straight to the dashboard (no authentication).
 document.addEventListener("DOMContentLoaded", () => {
     switchPage("dashboard");
@@ -200,7 +206,10 @@ async function startPractice(signName, lessonTitle) {
                 });
             };
 
-            video.src = `/videos/${activeSign.sign_name.toLowerCase()}.mp4`;
+            // crossOrigin is required so the phase model can read frames off the
+            // canvas when videos are served from another origin (with CORS).
+            video.crossOrigin = "anonymous";
+            video.src = `${VIDEO_BASE_URL}/${encodeURIComponent(activeSign.sign_name.toLowerCase())}.mp4`;
             video.load();
         }
     } catch (err) {

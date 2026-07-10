@@ -1,10 +1,6 @@
-# Web API + server
+# Backend web API + server (all the deployed app needs — landmark detection
+# and scoring run client-side in the browser via MediaPipe from a CDN).
 fastapi
-uvicorn
+uvicorn[standard]
 sqlalchemy
 pydantic
-
-# Reference-feature precompute pipeline (scripts/precompute_refs.py)
-numpy
-opencv-python
-mediapipe

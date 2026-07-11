@@ -29,6 +29,12 @@ const HOLD_COMPLETE_Q = 0.55;      // quality above which a phase counts as "rea
 const REF_MOTION_HOLD_FRAC = 0.45; // ref frame is a hold if motion < this fraction of the sign's peak motion
 const REF_MIN_HOLD_MOTION = 0.025; // absolute floor for the hold-motion threshold
 const PHASE_MERGE_DIST = 0.10;     // merge consecutive ref holds whose targets are closer than this
+// Idle-bookend trimming: the clip settles into a neutral resting pose (hands
+// hanging down) before/after the sign. Leading/trailing holds whose highest hand
+// is low in the frame (wrist-Y above REST_FLOOR) are dropped as dormant; active
+// signing poses sit below the floor and are kept. We only trim the ends and stop
+// at one hold, so every sign keeps at least its single most meaningful phase.
+const REST_FLOOR = 0.92;
 const MOVE_WEIGHT = 0.20;          // how much movement-direction agreement modulates a phase's credit
 // Feature indices that carry hand position/orientation (used for move direction).
 const POSITION_DIMS = [5, 6, 7, 14, 15, 16, 22, 23, 24, 25];
@@ -802,6 +808,17 @@ function buildPhaseModel(seq) {
 
     const holds = merged.map((m) => m.pose);
     const times = merged.map((m) => ((m.start + m.end) / 2) * dt);
+
+    // Drop idle/dormant bookend holds — the neutral resting pose the signer
+    // settles into before and after the sign (hands down). "Resting" is judged
+    // RELATIVE to the sign's most-raised hold (robust to wrist-Y noise) plus an
+    // absolute floor. Only leading/trailing holds are trimmed and the peak hold
+    // is never resting, so we always keep at least one meaningful phase.
+    if (holds.length > 1) {
+        const dormant = (h) => Math.min(h.features[23], h.features[25]) > REST_FLOOR; // hands hanging down
+        while (holds.length > 1 && dormant(holds[0])) { holds.shift(); times.shift(); }
+        while (holds.length > 1 && dormant(holds[holds.length - 1])) { holds.pop(); times.pop(); }
+    }
 
     // Dominant movement direction into each hold (over position/orientation dims).
     const moveDirs = holds.map((h, p) => {

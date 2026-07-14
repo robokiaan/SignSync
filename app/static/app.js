@@ -8,7 +8,7 @@ let activeSign = null;
 // phase model draws each frame to a canvas (cross-origin video would taint it).
 const VIDEO_BASE_URL = "/videos";
 
-// Site content (dictionary/sentences) baked to static JSON by
+// Site content (dictionary/lessons/sentences) baked to static JSON by
 // scripts/build_static_data.py - there's no backend on GitHub Pages to serve
 // /api/* at request time, so this loads once and everything below reads from
 // it in memory instead of fetching per page. dictionaryByName + aliasIndex
@@ -28,40 +28,15 @@ function loadSiteData() {
         const opts = { cache: "no-cache" };
         siteDataPromise = Promise.all([
             fetch("/data/dictionary.json", opts).then((r) => r.json()),
+            fetch("/data/lessons.json", opts).then((r) => r.json()),
             fetch("/data/sentences.json", opts).then((r) => r.json()),
-        ]).then(([dictionary, sentences]) => {
-            siteData = { dictionary, sentences };
+        ]).then(([dictionary, lessons, sentences]) => {
+            siteData = { dictionary, lessons, sentences };
             dictionaryByName = new Map(dictionary.map((s) => [s.sign_name, s]));
             aliasIndex = buildAliasIndex(dictionary.map((s) => s.sign_name));
         });
     }
     return siteDataPromise;
-}
-
-// Easiest-to-hardest ordering for the dashboard's sign sequence, scored off
-// phases.json's real per-sign complexity (coach.js's precomputedPhasesPromise -
-// loads before this ever runs, since coach.js is a blocking <script> tag
-// executed before DOMContentLoaded, which is what triggers the first call
-// into this): fewer hold-phases and fewer hands required = easier. "pose" is
-// true for every sign in the dataset, so it carries no signal and is dropped.
-// "Alright" is pinned first regardless, as the deliberate opening sign.
-async function computeSignOrder() {
-    const phases = await precomputedPhasesPromise;
-    const scored = siteData.dictionary.map((sign) => {
-        const model = phases[sign.sign_name];
-        const holds = model && model.holdTimes ? model.holdTimes.length : 2;
-        const hands = model && model.requires ? model.requires.hands : 2;
-        return { sign, score: holds * 10 + hands * 3 };
-    });
-    scored.sort((a, b) => a.score - b.score || a.sign.sign_name.localeCompare(b.sign.sign_name));
-    const ordered = scored.map((s) => s.sign);
-
-    const alrightIdx = ordered.findIndex((s) => s.sign_name === "alright");
-    if (alrightIdx > 0) {
-        const [alrightSign] = ordered.splice(alrightIdx, 1);
-        ordered.unshift(alrightSign);
-    }
-    return ordered;
 }
 
 // Template-based random sentence synthesis (not a translator, not an LLM
@@ -203,31 +178,52 @@ function showAlert(message, type = "success") {
     }, 4000);
 }
 
-// Load the Dashboard's sign sequence: every sign, easiest to hardest
-// (computeSignOrder), starting from "alright" - not grouped by category.
+// Load Lessons in Dashboard
 async function loadLessons() {
     try {
         await loadSiteData();
-        const ordered = await computeSignOrder();
+        const lessons = [...siteData.lessons];
+
+        // Sort lessons: Beginner -> Intermediate -> Advanced
+        const difficultyOrder = { beginner: 1, intermediate: 2, advanced: 3 };
+        lessons.sort((a, b) => {
+            const diffA = difficultyOrder[a.difficulty_level.toLowerCase()] || 99;
+            const diffB = difficultyOrder[b.difficulty_level.toLowerCase()] || 99;
+            return diffA - diffB;
+        });
 
         const container = document.getElementById("dashboard-lessons-container");
-        container.className = "dict-grid";
         container.innerHTML = "";
 
-        ordered.forEach((sign, idx) => {
-            const card = document.createElement("div");
-            card.className = "dict-card glass";
-            card.onclick = () => startPractice(sign.sign_name, "Sign Sequence");
-            card.innerHTML = `
-                <div style="font-size:0.75rem; color:var(--text-secondary); font-weight:700; margin-bottom:0.25rem;">#${idx + 1}</div>
-                <h3>${sign.sign_name}</h3>
-                <span class="tag tag-category" style="margin-bottom:0.5rem; display:inline-block;">${sign.category}</span>
-                <p>${sign.description || ""}</p>
+        lessons.forEach((lesson) => {
+            const lessonCard = document.createElement("div");
+            lessonCard.className = "lesson-card glass";
+
+            let itemsListHtml = '<div style="display:flex; flex-wrap:wrap; gap: 0.5rem; margin-top: 0.75rem;">';
+            lesson.items.forEach((item) => {
+                itemsListHtml += `
+                    <button class="btn btn-secondary" onclick="startPractice('${item.sign.sign_name}', '${lesson.title}')" style="width:auto; padding:0.4rem 0.8rem; font-size:0.85rem; text-transform:capitalize;">
+                        🎬 ${item.sign.sign_name}
+                    </button>
+                `;
+            });
+            itemsListHtml += "</div>";
+
+            lessonCard.innerHTML = `
+                <div class="lesson-details">
+                    <div class="tag-list">
+                        <span class="tag tag-beginner">${lesson.difficulty_level}</span>
+                        <span class="tag tag-category">${lesson.category}</span>
+                    </div>
+                    <h3 style="margin-top: 0.5rem;">${lesson.title}</h3>
+                    <p>${lesson.description || "No description provided."}</p>
+                    ${itemsListHtml}
+                </div>
             `;
-            container.appendChild(card);
+            container.appendChild(lessonCard);
         });
     } catch (err) {
-        console.error("Error loading sign sequence:", err);
+        console.error("Error loading lessons:", err);
     }
 }
 

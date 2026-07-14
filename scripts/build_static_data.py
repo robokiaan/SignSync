@@ -16,7 +16,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.seed import get_category_for_sign, slugify_gloss
+from app.seed import CATEGORIES_MAP, BEGINNER_CATEGORIES, get_category_for_sign, slugify_gloss
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(ROOT, "app", "static", "data")
@@ -37,6 +37,37 @@ def build_dictionary():
             "description": f"Practice the sign for '{name.title()}' in the {cat} category.",
         })
     return signs
+
+
+def build_lessons(signs):
+    by_name = {s["sign_name"]: s for s in signs}
+    by_cat = {}
+    for s in signs:
+        by_cat.setdefault(s["category"], []).append(s)
+
+    # Category order matches CATEGORIES_MAP's own definition order (not
+    # alphabetical - the old DB-backed backend's order was filesystem/manifest
+    # dependent and not reliably reproducible, but CATEGORIES_MAP's order is
+    # deterministic and was clearly deliberately chosen). "General" (the
+    # fallback for unmapped signs, not itself a CATEGORIES_MAP key) goes last.
+    cat_order = [cat.title() for cat in CATEGORIES_MAP] + ["General"]
+    ordered_cats = sorted(by_cat, key=lambda c: cat_order.index(c) if c in cat_order else len(cat_order))
+
+    lessons = []
+    for lesson_id, cat in enumerate(ordered_cats, start=1):
+        cat_signs = sorted(by_cat[cat], key=lambda s: s["sign_name"])
+        lessons.append({
+            "id": lesson_id,
+            "title": f"Mastering {cat}",
+            "category": cat,
+            "difficulty_level": "beginner" if cat in BEGINNER_CATEGORIES else "intermediate",
+            "description": f"Learn and master Indian Sign Language signs related to {cat}.",
+            "items": [
+                {"id": idx, "sign_id": s["id"], "sort_order": idx, "sign": s}
+                for idx, s in enumerate(cat_signs, start=1)
+            ],
+        })
+    return lessons
 
 
 def build_sentences(signs):
@@ -86,9 +117,10 @@ def build_sentences(signs):
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     signs = build_dictionary()
+    lessons = build_lessons(signs)
     sentences = build_sentences(signs)
 
-    for name, data in [("dictionary.json", signs), ("sentences.json", sentences)]:
+    for name, data in [("dictionary.json", signs), ("lessons.json", lessons), ("sentences.json", sentences)]:
         with open(os.path.join(OUT_DIR, name), "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
         print(f"Wrote {name}: {len(data)} entries")

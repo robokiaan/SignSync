@@ -26,3 +26,7 @@ app/static/videos/*.mp4
 Thumbs.db
 .agents/
 .gemini/
+.claude/
+
+# Regeneratable intermediate artifacts
+scripts/contact_sheets/

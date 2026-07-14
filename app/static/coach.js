@@ -34,7 +34,14 @@ const PHASE_MERGE_DIST = 0.10;     // merge consecutive ref holds whose targets 
 // is low in the frame (wrist-Y above REST_FLOOR) are dropped as dormant; active
 // signing poses sit below the floor and are kept. We only trim the ends and stop
 // at one hold, so every sign keeps at least its single most meaningful phase.
-const REST_FLOOR = 0.92;
+// Calibrated across ~20 sampled signs: genuine idle/rest poses land at wrist-Y
+// 0.957-1.0 (usually exactly 1.0, hand fully hanging), while real end-of-sign
+// holds that were getting wrongly swept up sit at 0.92-0.943 (e.g. "hello"'s
+// closing pose at 0.928, "how are you"'s repeated-motion holds at ~0.93-0.94).
+// 0.95 sits in the gap between those two populations. Anchored against
+// "alright", whose intentional 3->1 collapse (bookends pinned at Y=1.0, real
+// thumbs-up content at Y=0.902) must survive any reasonable threshold here.
+const REST_FLOOR = 0.95;
 const MOVE_WEIGHT = 0.20;          // how much movement-direction agreement modulates a phase's credit
 // Feature indices that carry hand position/orientation (used for move direction).
 const POSITION_DIMS = [5, 6, 7, 14, 15, 16, 22, 23, 24, 25];
@@ -50,17 +57,45 @@ let missingLimbFrames = 0;     // consecutive frames missing a required limb (de
 let lastDisplayScore = 0;      // last score shown (kept while prompting for limbs)
 let prevUserSmoothed = null;   // last smoothed user frame, for feature EMA
 
+// Sentence-practice session state (reset in endSentenceSession). The learner
+// signs each word of `sentenceGloss` in order, reusing the single-sign phase
+// state machine above (activePhaseModel/phaseBest/phaseReached/curPhase) for
+// whichever word is current - see analyzeSentenceFeedback().
+let sentenceActive = false;         // is a sentence session in progress?
+let sentenceGloss = [];             // ordered lowercase sign names for the active sentence
+let curWordIdx = 0;                 // index into sentenceGloss the learner is working toward
+let wordReached = [];               // per-word: has it been completed?
+let wordBestScore = [];             // per-word: best display score achieved
+let misclassifyStreak = 0;          // consecutive frames the classifier saw a DIFFERENT word than expected
+let lastMisclassifiedWord = null;   // that word, for the "looks like X" feedback message
+let sentenceViewMode = "all";       // sentence-mode view selector; "all" is the default and only mode today
+let videoChainIdx = 0;              // index into sentenceGloss for the combined reference-video playback ("all" mode)
+
 let coachDebug = true;         // show the live scoring breakdown panel
 
 let canvasElement, canvasCtx;
 
 // Reference sequence buffers + caches
 let refSequence = [];
+// Raw-landmark capture for the 3D avatar pipeline (offline extraction only -
+// see scripts/extract_avatar_landmarks.py). Gated behind window.CAPTURE_RAW_LANDMARKS
+// (default off) so this is a no-op, zero-behavior-change addition to the live
+// coaching path. Populated alongside refSequence during 'ref' priming.
+let rawRefSequence = [];
 const refCache = {};           // signName -> reference feature sequence (in-memory)
 const phaseCache = {};         // signName -> phase model
 let holisticMode = "idle";     // 'idle' | 'ref' | 'user'
 let refReadyPromise = Promise.resolve();
 let activePrimeId = 0;         // guards against overlapping reference primings
+
+// Offline-precomputed phase models (scripts/precompute_phases.py), keyed by
+// lowercased sign name. When present for a sign, primeReference() skips live
+// in-browser priming entirely instead of running the reference video through
+// Holistic frame-by-frame. Missing/failed fetch just means every sign falls
+// back to live priming, same as before this file existed.
+const precomputedPhasesPromise = fetch("phases.json")
+    .then((r) => (r.ok ? r.json() : {}))
+    .catch(() => ({}));
 
 const SAMPLE_FPS = 5;           // reference sampling rate (holds are matched per-frame, so the live rate can be higher)
 const USER_THROTTLE_MS = 100;   // live webcam MediaPipe interval; lower = snappier score (send() is serialized, so no backup)
@@ -96,6 +131,14 @@ function ensureHolisticModel() {
 function onHolisticResults(results) {
     if (holisticMode === "ref") {
         refSequence.push(extractFrameFeatures(results));
+        if (window.CAPTURE_RAW_LANDMARKS) {
+            rawRefSequence.push({
+                pose: results.poseLandmarks || null,
+                poseWorld: findWorldLandmarks(results),
+                leftHand: results.leftHandLandmarks || null,
+                rightHand: results.rightHandLandmarks || null,
+            });
+        }
         return;
     }
     if (holisticMode !== "user" || !isWebcamActive || !canvasElement || !canvasCtx) return;
@@ -104,7 +147,15 @@ function onHolisticResults(results) {
     canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
     drawCustomSkeleton(results);
 
-    if (activeSign) analyzeFeedback(results);
+    if (sentenceActive) {
+        // "all" = order-gated whole-sentence scoring; a specific focused word
+        // reuses the plain single-sign scorer (activePhaseModel already points
+        // at that word - see focusOnWord) without touching curWordIdx/wordReached.
+        if (sentenceViewMode === "all") analyzeSentenceFeedback(results);
+        else analyzeFeedback(results);
+    } else if (activeSign) {
+        analyzeFeedback(results);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,8 +170,16 @@ async function primeReference(signName) {
         return;
     }
 
+    const precomputed = await precomputedPhasesPromise;
+    if (myId !== activePrimeId) return; // superseded while the fetch was in flight
+    if (precomputed && precomputed[signName]) {
+        phaseCache[signName] = precomputed[signName];
+        activatePhaseModel(signName);
+        return;
+    }
+
     const video = document.getElementById("practice-ref-video");
-    if (!video) { refSequence = []; return; }
+    if (!video) { refSequence = []; rawRefSequence = []; return; }
 
     ensureHolisticModel();
     await waitForVideoReady(video);
@@ -128,6 +187,7 @@ async function primeReference(signName) {
 
     document.getElementById("coach-feedback-status").textContent = "Analyzing reference...";
     refSequence = [];
+    rawRefSequence = [];
     const previousMode = holisticMode;
     holisticMode = "ref";
     try {
@@ -144,6 +204,10 @@ async function primeReference(signName) {
         // Return the video to a clean looping state for the learner to watch.
         video.loop = true;
         try { video.currentTime = 0; } catch (e) { /* ignore */ }
+        // The "Analyzing reference..." status only gets set on this slow path,
+        // so only this path needs to clear it back out.
+        const status = document.getElementById("coach-feedback-status");
+        if (status && status.textContent === "Analyzing reference...") status.textContent = "Idle";
     }
 }
 
@@ -468,6 +532,7 @@ function speakFeedback(text) {
 
 function resetDTWSequences() {
     refSequence = [];
+    rawRefSequence = [];
     activePhaseModel = null;
     prevUserSmoothed = null;
     resetPhaseProgress();
@@ -520,40 +585,24 @@ function sameVisibility(a, b) {
     return a.rightHand === b.rightHand && a.leftHand === b.leftHand && a.pose === b.pose;
 }
 
-function analyzeFeedback(results) {
-    const user = smoothUserFrame(extractFrameFeatures(results));
+// Which required-limb prompt (if any) applies to this frame, or null if the
+// learner is showing everything the active sign/word needs.
+function requiredLimbsMissing(user, need) {
+    const handsShown = (user.visibility.rightHand ? 1 : 0) + (user.visibility.leftHand ? 1 : 0);
+    const missingPose = need.pose && !user.visibility.pose;
+    if (handsShown >= need.hands && !missingPose) return null;
+    if (missingPose) return "Step back so your head and upper body are in view.";
+    if (need.hands >= 2) return "Show both hands to the camera for this sign.";
+    return "Show your signing hand to the camera.";
+}
 
-    if (!activePhaseModel || activePhaseModel.holds.length === 0) {
-        document.getElementById("coach-feedback-status").textContent = "Analyzing reference...";
-        return;
-    }
-
+// Score the user's current frame against activePhaseModel: advance curPhase,
+// latch best-per-phase quality, and compute the aggregate score. Shared by
+// single-sign practice (analyzeFeedback) and sentence practice
+// (analyzeSentenceFeedback) so the phase state machine isn't duplicated.
+function scoreActiveModel(user) {
     const holds = activePhaseModel.holds;
     const P = holds.length;
-    const need = activePhaseModel.requires;
-
-    // Prompt (debounced) if the sign needs limbs the learner isn't showing, and
-    // freeze the score meanwhile so it can't be gamed by hiding a required hand.
-    const handsShown = (user.visibility.rightHand ? 1 : 0) + (user.visibility.leftHand ? 1 : 0);
-    const missingHands = handsShown < need.hands;
-    const missingPose = need.pose && !user.visibility.pose;
-    if (missingHands || missingPose) {
-        missingLimbFrames++;
-        if (missingLimbFrames >= 3) {
-            let msg;
-            if (missingPose) msg = "Step back so your head and upper body are in view.";
-            else if (need.hands >= 2) msg = "Show both hands to the camera for this sign.";
-            else msg = "Show your signing hand to the camera.";
-            document.getElementById("coach-feedback-status").textContent = "Show required limbs";
-            document.getElementById("coach-feedback-message").textContent = msg;
-            document.getElementById("coach-score-display").textContent = `${lastDisplayScore}%`;
-            speakFeedback(msg);
-            updateCoachDebug({ P, curPhase, q: holds.map(() => 0), displayScore: lastDisplayScore, worstIdx: -1, worstDiff: 0, prompt: msg });
-            return;
-        }
-    } else {
-        missingLimbFrames = 0;
-    }
 
     // How well the user's current pose matches each hold (mirror-aware). `um` is
     // the user frame in whichever orientation matched, for feedback + move dir.
@@ -578,19 +627,6 @@ function analyzeFeedback(results) {
         }
     }
 
-    // Attempt restart: only after the learner FINISHED, then moved off the final
-    // pose, then returned to the start pose (avoids false restarts on signs whose
-    // start and end look alike).
-    if (P > 1 && phaseReached[P - 1]) {
-        if (q[P - 1] < 0.35) leftFinalPose = true;
-        if (leftFinalPose && q[0] >= HOLD_COMPLETE_Q) {
-            resetPhaseProgress();
-            phaseBest[0] = q[0];
-            phaseReached[0] = true;
-            phaseUserPose[0] = matches[0].um.features.slice();
-        }
-    }
-
     // Score = mean over phases of (best hold quality x movement-direction credit).
     // Completed phases keep their best (latched), so holding the final pose can't
     // make the score collapse; unreached phases contribute 0.
@@ -603,12 +639,60 @@ function analyzeFeedback(results) {
         sum += contrib * moveCredit(p);
     }
     const displayScore = Math.round(clamp01(sum / P) * 99);
-    lastDisplayScore = displayScore;
 
-    // Feedback focuses on the current phase (diagnose against the matched orientation).
+    // Diagnose against the current phase's target (post-advance), in whichever
+    // orientation matched.
     const target = holds[curPhase];
     const { idx: worstIdx, diff: worstDiff } = jointDiagnostic(matches[curPhase].um, target);
-    const done = phaseReached.every(Boolean);
+
+    return { P, q, matches, displayScore, allPhasesReached: phaseReached.every(Boolean), worstIdx, worstDiff };
+}
+
+function analyzeFeedback(results) {
+    const user = smoothUserFrame(extractFrameFeatures(results));
+
+    if (!activePhaseModel || activePhaseModel.holds.length === 0) {
+        document.getElementById("coach-feedback-status").textContent = "Analyzing reference...";
+        return;
+    }
+
+    // Prompt (debounced) if the sign needs limbs the learner isn't showing, and
+    // freeze the score meanwhile so it can't be gamed by hiding a required hand.
+    const need = activePhaseModel.requires;
+    const limbMsg = requiredLimbsMissing(user, need);
+    if (limbMsg) {
+        missingLimbFrames++;
+        if (missingLimbFrames >= 3) {
+            const P = activePhaseModel.holds.length;
+            document.getElementById("coach-feedback-status").textContent = "Show required limbs";
+            document.getElementById("coach-feedback-message").textContent = limbMsg;
+            document.getElementById("coach-score-display").textContent = `${lastDisplayScore}%`;
+            speakFeedback(limbMsg);
+            updateCoachDebug({ P, curPhase, q: activePhaseModel.holds.map(() => 0), displayScore: lastDisplayScore, worstIdx: -1, worstDiff: 0, prompt: limbMsg });
+            return;
+        }
+    } else {
+        missingLimbFrames = 0;
+    }
+
+    const { P, q, matches, displayScore, allPhasesReached: done, worstIdx, worstDiff } = scoreActiveModel(user);
+    lastDisplayScore = displayScore;
+
+    // Attempt restart: only after the learner FINISHED, then moved off the final
+    // pose, then returned to the start pose (avoids false restarts on signs whose
+    // start and end look alike). Single-sign practice only - a sentence session
+    // advances to the next WORD instead of restarting the same one.
+    if (P > 1 && phaseReached[P - 1]) {
+        if (q[P - 1] < 0.35) leftFinalPose = true;
+        if (leftFinalPose && q[0] >= HOLD_COMPLETE_Q) {
+            resetPhaseProgress();
+            phaseBest[0] = q[0];
+            phaseReached[0] = true;
+            phaseUserPose[0] = matches[0].um.features.slice();
+        }
+    }
+
+    // Feedback focuses on the current phase (diagnose against the matched orientation).
     let feedback;
     if (done && displayScore >= 75) {
         feedback = `All ${P} phase${P > 1 ? "s" : ""} matched — excellent!`;
@@ -629,6 +713,294 @@ function analyzeFeedback(results) {
     document.getElementById("coach-score-display").textContent = `${displayScore}%`;
 
     updateCoachDebug({ P, curPhase, q, displayScore, worstIdx, worstDiff });
+}
+
+// ---------------------------------------------------------------------------
+// Sentence practice: sign a full sentence in the correct ISL gloss order.
+// The learner must complete each gloss word (via the same phase state machine
+// as single-sign practice) to advance - order is enforced structurally, not
+// just suggested. On top of that, every frame is ALSO classified against every
+// OTHER word in the sentence (nearest-neighbor over the same matchHold/pose-
+// distance function, scoped to this sentence's own words rather than the full
+// 262-sign dictionary) so a learner performing the wrong word gets told what
+// it looked like instead of a generic "keep trying". Word phase models come
+// straight from the precomputed phases.json fetch (`precomputedPhasesPromise`)
+// - unlike primeReference()'s per-sign lazy caching, we need every gloss word
+// available at once, so they're copied into `phaseCache` up front here rather
+// than one at a time - so no live priming happens between words.
+// ---------------------------------------------------------------------------
+async function beginSentenceSession(englishText, glossSignNames) {
+    const precomputed = await precomputedPhasesPromise;
+
+    sentenceGloss = glossSignNames.map((w) => w.toLowerCase());
+    for (const word of sentenceGloss) {
+        if (!phaseCache[word] && precomputed && precomputed[word]) {
+            phaseCache[word] = precomputed[word];
+        }
+    }
+    curWordIdx = 0;
+    wordReached = new Array(sentenceGloss.length).fill(false);
+    wordBestScore = new Array(sentenceGloss.length).fill(0);
+    misclassifyStreak = 0;
+    lastMisclassifiedWord = null;
+    sentenceActive = true;
+
+    loadCurrentWord();
+    renderGlossStrip();
+    applyViewMode();
+
+    document.getElementById("coach-feedback-status").textContent = "Ready";
+    document.getElementById("coach-feedback-message").textContent =
+        `Sign "${sentenceGloss[0]}" first (word 1 of ${sentenceGloss.length}).`;
+}
+
+function endSentenceSession() {
+    sentenceActive = false;
+    sentenceGloss = [];
+    curWordIdx = 0;
+    wordReached = [];
+    wordBestScore = [];
+    misclassifyStreak = 0;
+    lastMisclassifiedWord = null;
+    sentenceViewMode = "all"; // next sentence session always starts on the default view
+
+    const strip = document.getElementById("sentence-gloss-strip");
+    if (strip) {
+        strip.style.display = "none";
+        strip.innerHTML = "";
+    }
+
+    const video = document.getElementById("practice-ref-video");
+    if (video) video.onended = null;
+
+    const gallery = document.getElementById("phase-frames");
+    if (gallery) {
+        gallery.style.display = "none";
+        gallery.innerHTML = "";
+    }
+}
+
+// Sentence-mode view selector - chips rendered into #sentence-gloss-strip (see
+// renderGlossStrip): "all" (default) or a specific gloss word. Selecting a
+// word switches the coach into plain single-sign scoring for THAT word alone
+// (activePhaseModel repointed, curWordIdx/wordReached untouched - see the
+// onHolisticResults dispatch), so free-practicing a word out of order never
+// corrupts the order-gated "all" progress; switching back to "all" resumes it
+// exactly where it was.
+function setSentenceViewMode(mode) {
+    sentenceViewMode = mode;
+    renderGlossStrip();
+    if (!sentenceActive) return;
+
+    if (mode === "all") {
+        loadCurrentWord(); // repoint activePhaseModel at curWordIdx's word
+    } else {
+        focusOnWord(mode); // repoint activePhaseModel at the selected word
+    }
+    applyViewMode();
+}
+
+// Drives the reference-video display + phase-frame gallery for whichever mode
+// is active. Scoring state (activePhaseModel etc.) is set separately by
+// loadCurrentWord()/focusOnWord() before this is called.
+function applyViewMode() {
+    if (sentenceViewMode === "all") {
+        playCombinedVideo();
+        showSentencePhaseFrames();
+    } else {
+        loadWordVideo(sentenceViewMode);
+        showWordPhaseFrames(sentenceViewMode);
+    }
+}
+
+// Point the active phase model at the current (curWordIdx) word - the "all"
+// mode's order-gated scoring target. Video display is handled separately by
+// applyViewMode()/playCombinedVideo(), not here.
+function loadCurrentWord() {
+    const word = sentenceGloss[curWordIdx];
+    activePhaseModel = phaseCache[word] || null;
+    resetPhaseProgress();
+}
+
+// Point the active phase model at an arbitrary gloss word for free practice,
+// independent of curWordIdx/order-gating (see setSentenceViewMode above).
+function focusOnWord(word) {
+    activePhaseModel = phaseCache[word] || null;
+    resetPhaseProgress();
+}
+
+// Single-word view mode: the reference video shows just that one word's clip,
+// looping, like ordinary single-sign practice.
+function loadWordVideo(word) {
+    const video = document.getElementById("practice-ref-video");
+    const placeholder = document.getElementById("video-placeholder");
+    if (!video) return;
+    video.pause();
+    video.loop = true;
+    video.onended = null; // clear any leftover chain handler from "all" mode
+    video.crossOrigin = "anonymous";
+    video.onloadeddata = () => {
+        if (placeholder) placeholder.style.display = "none";
+        video.style.display = "block";
+        video.play().catch(() => {});
+    };
+    video.src = `${VIDEO_BASE_URL}/${encodeURIComponent(word)}.mp4`;
+    video.load();
+}
+
+// "All" view mode: chain every gloss word's reference clip into one continuous
+// looping playback, independent of the learner's scoring progress (curWordIdx/
+// activePhaseModel keep tracking exactly as before via loadCurrentWord above).
+function playCombinedVideo() {
+    const video = document.getElementById("practice-ref-video");
+    if (!video || sentenceGloss.length === 0) return;
+    videoChainIdx = 0;
+    video.loop = false;
+    video.onended = handleChainedVideoEnded;
+    loadChainedWord(videoChainIdx);
+}
+
+function loadChainedWord(idx) {
+    const video = document.getElementById("practice-ref-video");
+    const placeholder = document.getElementById("video-placeholder");
+    if (!video) return;
+    const word = sentenceGloss[idx];
+    video.pause();
+    video.crossOrigin = "anonymous";
+    video.onloadeddata = () => {
+        if (placeholder) placeholder.style.display = "none";
+        video.style.display = "block";
+        video.play().catch(() => {});
+    };
+    video.src = `${VIDEO_BASE_URL}/${encodeURIComponent(word)}.mp4`;
+    video.load();
+}
+
+function handleChainedVideoEnded() {
+    if (sentenceViewMode !== "all" || !sentenceActive || sentenceGloss.length === 0) return;
+    videoChainIdx = (videoChainIdx + 1) % sentenceGloss.length;
+    loadChainedWord(videoChainIdx);
+}
+
+// Every chip doubles as a view-mode selector (setSentenceViewMode): word
+// chips still show sentence progress (green once done) but ALSO carry
+// "view-active" (a ring, not a color override - see .gloss-chip.view-active)
+// when that word is the focused view, so progress state stays visible
+// alongside the selection. The "All" chip is plain except for that same ring.
+// Unreached words are left unstyled (no "current" highlight) so they look
+// like ordinary chips rather than implying one is more clickable than another.
+function renderGlossStrip() {
+    const strip = document.getElementById("sentence-gloss-strip");
+    if (!strip) return;
+    strip.style.display = "flex";
+    const wordChips = sentenceGloss
+        .map((word, i) => {
+            const progressCls = wordReached[i] ? "done" : "";
+            const selectedCls = sentenceViewMode === word ? "view-active" : "";
+            return `<span class="gloss-chip ${progressCls} ${selectedCls}" style="cursor:pointer;" onclick="setSentenceViewMode('${word}')" title="Focus this word: its own video, phase frames, and camera check">${i + 1}. ${word}</span>`;
+        })
+        .join("");
+    const viewChip = `<span class="gloss-chip ${sentenceViewMode === "all" ? "view-active" : ""}" style="margin-left:auto; cursor:pointer;" onclick="setSentenceViewMode('all')" title="Combined video, phase frames, and camera check for the whole sentence">All</span>`;
+    strip.innerHTML = wordChips + viewChip;
+}
+
+function analyzeSentenceFeedback(results) {
+    if (curWordIdx >= sentenceGloss.length) return; // sentence already complete - leave the summary showing
+
+    const user = smoothUserFrame(extractFrameFeatures(results));
+
+    if (!activePhaseModel || activePhaseModel.holds.length === 0) {
+        document.getElementById("coach-feedback-status").textContent = "Loading word...";
+        return;
+    }
+
+    const need = activePhaseModel.requires;
+    const limbMsg = requiredLimbsMissing(user, need);
+    if (limbMsg) {
+        missingLimbFrames++;
+        if (missingLimbFrames >= 3) {
+            document.getElementById("coach-feedback-status").textContent = "Show required limbs";
+            document.getElementById("coach-feedback-message").textContent = limbMsg;
+            speakFeedback(limbMsg);
+            return;
+        }
+    } else {
+        missingLimbFrames = 0;
+    }
+
+    const result = scoreActiveModel(user);
+    lastDisplayScore = result.displayScore;
+
+    // Classification pass: does the learner look more like a DIFFERENT gloss
+    // word than the one currently expected? Nearest-neighbor over each
+    // candidate word's own precomputed holds, scoped to this sentence's words.
+    let bestWord = sentenceGloss[curWordIdx];
+    let bestQ = Math.max(...result.q, 0);
+    for (let i = 0; i < sentenceGloss.length; i++) {
+        if (i === curWordIdx) continue;
+        const model = phaseCache[sentenceGloss[i]];
+        if (!model || !model.holds.length) continue;
+        const q = Math.max(...model.holds.map((h) => matchHold(user, h).q));
+        if (q > bestQ + 0.15) {
+            bestQ = q;
+            bestWord = sentenceGloss[i];
+        }
+    }
+    if (bestWord !== sentenceGloss[curWordIdx]) {
+        misclassifyStreak++;
+        lastMisclassifiedWord = bestWord;
+    } else {
+        misclassifyStreak = 0;
+        lastMisclassifiedWord = null;
+    }
+
+    if (misclassifyStreak >= 3 && lastMisclassifiedWord) {
+        const idx = sentenceGloss.indexOf(lastMisclassifiedWord);
+        const where = idx < curWordIdx ? "you already signed that" : "that comes later in this sentence";
+        const msg = `That looked like "${lastMisclassifiedWord}" — ${where}. We're on "${sentenceGloss[curWordIdx]}" now.`;
+        document.getElementById("coach-feedback-status").textContent = "Out of order?";
+        document.getElementById("coach-feedback-message").textContent = msg;
+        document.getElementById("coach-score-display").textContent = `${result.displayScore}%`;
+        speakFeedback(msg);
+    } else {
+        document.getElementById("coach-feedback-status").textContent = `Score: ${result.displayScore}%`;
+        document.getElementById("coach-feedback-message").textContent = result.allPhasesReached
+            ? `"${sentenceGloss[curWordIdx]}" matched!`
+            : `Sign "${sentenceGloss[curWordIdx]}" (word ${curWordIdx + 1}/${sentenceGloss.length}).`;
+        document.getElementById("coach-score-display").textContent = `${result.displayScore}%`;
+    }
+
+    updateSentenceDebug(result, bestWord, bestQ);
+
+    if (result.allPhasesReached) {
+        wordReached[curWordIdx] = true;
+        wordBestScore[curWordIdx] = result.displayScore;
+        curWordIdx++;
+        if (curWordIdx < sentenceGloss.length) {
+            loadCurrentWord();
+        } else {
+            finishSentenceSession();
+        }
+        renderGlossStrip();
+    }
+}
+
+function finishSentenceSession() {
+    const avg = Math.round(wordBestScore.reduce((a, b) => a + b, 0) / wordBestScore.length);
+    document.getElementById("coach-feedback-status").textContent = "Sentence complete!";
+    document.getElementById("coach-feedback-message").textContent =
+        `All ${sentenceGloss.length} words matched — average score ${avg}%.`;
+    document.getElementById("coach-score-display").textContent = `${avg}%`;
+    speakFeedback("Great job! You signed the whole sentence.");
+}
+
+function updateSentenceDebug(result, bestWord, bestQ) {
+    if (!coachDebug) return;
+    const el = document.getElementById("coach-debug");
+    if (!el) return;
+    el.textContent =
+        `word ${curWordIdx + 1}/${sentenceGloss.length} "${sentenceGloss[curWordIdx]}" | ` +
+        `score ${result.displayScore}% | classifier top match: ${bestWord} (${Math.round(bestQ * 100)}%)`;
 }
 
 // Match of a user frame to a hold target pose, considering BOTH orientations so
@@ -697,6 +1069,10 @@ function setCoachDebug(on) {
 // segmentation can be eyeballed. Seeks the ref video to each hold's timestamp
 // and captures a thumbnail. Triggered by the "Show Phase Frames" button.
 async function showPhaseFrames() {
+    if (sentenceActive) {
+        return sentenceViewMode === "all" ? showSentencePhaseFrames() : showWordPhaseFrames(sentenceViewMode);
+    }
+
     const gallery = document.getElementById("phase-frames");
     if (!gallery) return;
     gallery.style.display = "flex";
@@ -740,6 +1116,97 @@ async function showPhaseFrames() {
     if (!wasPaused) video.play().catch(() => {});
 }
 
+// Loads `word`'s reference clip into an offscreen video (doesn't touch the
+// visible #practice-ref-video, which the combined chain or focus mode owns
+// independently) and captures a thumbnail at each of its phase model's hold
+// timestamps. Shared by the combined ("all") and single-word galleries below.
+async function captureWordPhaseThumbnails(word, ctx, cnv) {
+    const model = phaseCache[word];
+    if (!model || !model.holdTimes || !model.holdTimes.length) return null;
+
+    const tempVideo = document.createElement("video");
+    tempVideo.crossOrigin = "anonymous";
+    tempVideo.muted = true;
+    tempVideo.playsInline = true;
+    tempVideo.src = `${VIDEO_BASE_URL}/${encodeURIComponent(word)}.mp4`;
+    await new Promise((resolve) => {
+        tempVideo.onloadeddata = resolve;
+        tempVideo.onerror = resolve;
+        tempVideo.load();
+    });
+    if (!tempVideo.duration) return null;
+
+    const frames = [];
+    for (let i = 0; i < model.holdTimes.length; i++) {
+        const t = Math.min(Math.max(model.holdTimes[i], 0), tempVideo.duration - 0.01);
+        await seekVideo(tempVideo, t);
+        ctx.drawImage(tempVideo, 0, 0, cnv.width, cnv.height);
+        frames.push(cnv.toDataURL("image/jpeg", 0.7));
+    }
+    return { model, frames };
+}
+
+// "All" view mode's combined phase-frame gallery: every gloss word's hold
+// thumbnails, in sentence order.
+async function showSentencePhaseFrames() {
+    const gallery = document.getElementById("phase-frames");
+    if (!gallery) return;
+    gallery.style.display = "flex";
+
+    if (!sentenceGloss.length) {
+        gallery.innerHTML = `<span style="color:var(--text-secondary)">No sentence loaded.</span>`;
+        return;
+    }
+    gallery.innerHTML = `<span style="color:var(--text-secondary)">Capturing phase frames for ${sentenceGloss.length} word(s)…</span>`;
+
+    const cnv = document.createElement("canvas");
+    cnv.width = 160; cnv.height = 120;
+    const ctx = cnv.getContext("2d");
+    const figs = [];
+
+    for (let w = 0; w < sentenceGloss.length; w++) {
+        const word = sentenceGloss[w];
+        const result = await captureWordPhaseThumbnails(word, ctx, cnv);
+        if (!result) continue;
+
+        figs.push(`<div style="align-self:center;font-size:0.78rem;font-weight:600;color:var(--text-main);padding:0 0.35rem;">${w + 1}. ${word}</div>`);
+        result.frames.forEach((dataUrl, i) => {
+            figs.push(`<div style="text-align:center;font-size:0.72rem;color:var(--text-secondary);">
+                <img src="${dataUrl}" style="width:160px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border-color);">
+                <div style="margin-top:0.25rem;">Phase ${i + 1}/${result.frames.length}</div>
+            </div>`);
+        });
+    }
+    gallery.innerHTML = figs.join("") || `<span style="color:var(--text-secondary)">No phase models available yet.</span>`;
+}
+
+// Single-word view mode's phase-frame gallery: just the focused word's holds.
+async function showWordPhaseFrames(word) {
+    const gallery = document.getElementById("phase-frames");
+    if (!gallery) return;
+    gallery.style.display = "flex";
+    gallery.innerHTML = `<span style="color:var(--text-secondary)">Capturing phase frames for "${word}"…</span>`;
+
+    const cnv = document.createElement("canvas");
+    cnv.width = 160; cnv.height = 120;
+    const ctx = cnv.getContext("2d");
+    const result = await captureWordPhaseThumbnails(word, ctx, cnv);
+    if (!result) {
+        gallery.innerHTML = `<span style="color:var(--text-secondary)">No phase model yet for "${word}".</span>`;
+        return;
+    }
+
+    const need = result.model.requires;
+    const figs = [`<div style="align-self:center;font-size:0.72rem;color:var(--text-secondary);padding-right:0.5rem;">needs ${need.hands} hand(s)${need.pose ? " + body" : ""}:</div>`];
+    result.frames.forEach((dataUrl, i) => {
+        figs.push(`<div style="text-align:center;font-size:0.72rem;color:var(--text-secondary);">
+            <img src="${dataUrl}" style="width:160px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border-color);">
+            <div style="margin-top:0.25rem;">Phase ${i + 1}/${result.frames.length}</div>
+        </div>`);
+    });
+    gallery.innerHTML = figs.join("");
+}
+
 // Live scoring breakdown so calibration can be data-driven against a real camera.
 function updateCoachDebug(d) {
     const el = document.getElementById("coach-debug");
@@ -767,33 +1234,66 @@ function buildPhaseModel(seq) {
     if (n === 0) return pack([], [], []);
     if (n <= 2) return pack([avgFrames(seq)], [null], [((n - 1) / 2) * dt]);
 
-    // Motion between consecutive frames.
+    // A hand tracked through most of the clip is "in play" for this sign.
+    // frameDistance masks out a hand wherever either frame can't see it, so a
+    // brief tracking dropout (common near the face) reads as near-zero motion
+    // even while the real gesture is mid-swing - a false hold. Gaps where an
+    // in-play hand drops out in either frame are never eligible to seed or
+    // extend a hold; they're always treated as a MOVE.
+    const handInPlay = {
+        right: seq.filter((f) => f.visibility.rightHand).length / n >= 0.5,
+        left: seq.filter((f) => f.visibility.leftHand).length / n >= 0.5,
+    };
+    const gapEligible = (a, b) =>
+        !(handInPlay.right && (!a.visibility.rightHand || !b.visibility.rightHand)) &&
+        !(handInPlay.left && (!a.visibility.leftHand || !b.visibility.leftHand));
+
+    // Motion between consecutive frames (peak is measured only over eligible
+    // gaps, so a dropout-inflated spike can't distort the hold threshold).
     const motion = [];
-    for (let i = 1; i < n; i++) motion.push(frameDistance(seq[i], seq[i - 1]));
-    const maxM = Math.max(...motion);
+    const eligible = [];
+    for (let i = 1; i < n; i++) {
+        motion.push(frameDistance(seq[i], seq[i - 1]));
+        eligible.push(gapEligible(seq[i - 1], seq[i]));
+    }
+    const eligibleMotions = motion.filter((_, i) => eligible[i]);
+    const maxM = eligibleMotions.length ? Math.max(...eligibleMotions) : Math.max(...motion);
     const thr = Math.max(REF_MIN_HOLD_MOTION, maxM * REF_MOTION_HOLD_FRAC);
 
-    // A HOLD is a run of consecutive LOW-motion gaps (a sustained pose); the
-    // high-motion gaps separating them are the MOVES (transitions we don't score).
+    // A HOLD is a run of consecutive eligible LOW-motion gaps (a sustained,
+    // fully-tracked pose); everything else is a MOVE we don't score.
     // Each hold run over gaps [start..g-1] connects frames [start..g].
     let segs = [];
     let g = 0;
     while (g < motion.length) {
-        if (motion[g] < thr) {
+        if (eligible[g] && motion[g] < thr) {
             const start = g;
-            while (g < motion.length && motion[g] < thr) g++;
+            while (g < motion.length && eligible[g] && motion[g] < thr) g++;
             segs.push({ pose: avgFrames(seq.slice(start, g + 1)), start, end: g });
         } else {
             g++;
         }
     }
-    // Fall back to endpoint poses if nothing segmented cleanly.
-    if (segs.length === 0) {
-        segs = [
-            { pose: avgFrames(seq.slice(0, Math.min(2, n))), start: 0, end: Math.min(1, n - 1) },
-            { pose: avgFrames(seq.slice(Math.max(0, n - 2))), start: Math.max(0, n - 2), end: n - 1 },
-        ];
-    }
+    // Best available proxy for "the sign's content" when segmentation can't
+    // find (or trimming leaves) any non-resting pose: the single frame where
+    // the in-play hand(s) are most raised, rather than a rest-adjacent frame.
+    const raisedFrameFallback = () => {
+        let bestIdx = 0, bestY = Infinity;
+        for (let i = 0; i < n; i++) {
+            const f = seq[i];
+            const y = Math.min(
+                handInPlay.right && f.visibility.rightHand ? f.features[23] : 1,
+                handInPlay.left && f.visibility.leftHand ? f.features[25] : 1
+            );
+            if (y < bestY) { bestY = y; bestIdx = i; }
+        }
+        const winStart = Math.max(0, bestIdx - 1), winEnd = Math.min(n - 1, bestIdx + 1);
+        return { pose: avgFrames(seq.slice(winStart, winEnd + 1)), start: winStart, end: winEnd };
+    };
+
+    // Nothing segmented cleanly (brief/fast sign, or dropouts masked every
+    // genuine pause).
+    if (segs.length === 0) segs = [raisedFrameFallback()];
 
     // Merge consecutive holds whose target poses are nearly identical.
     const merged = [segs[0]];
@@ -806,18 +1306,25 @@ function buildPhaseModel(seq) {
         }
     }
 
-    const holds = merged.map((m) => m.pose);
-    const times = merged.map((m) => ((m.start + m.end) / 2) * dt);
+    let holds = merged.map((m) => m.pose);
+    let times = merged.map((m) => ((m.start + m.end) / 2) * dt);
 
     // Drop idle/dormant bookend holds — the neutral resting pose the signer
-    // settles into before and after the sign (hands down). "Resting" is judged
-    // RELATIVE to the sign's most-raised hold (robust to wrist-Y noise) plus an
-    // absolute floor. Only leading/trailing holds are trimmed and the peak hold
-    // is never resting, so we always keep at least one meaningful phase.
+    // settles into before and after the sign (hands down). Only leading/
+    // trailing holds are trimmed, so a real hold in the middle survives.
+    const dormant = (h) => Math.min(h.features[23], h.features[25]) > REST_FLOOR; // hands hanging down
     if (holds.length > 1) {
-        const dormant = (h) => Math.min(h.features[23], h.features[25]) > REST_FLOOR; // hands hanging down
         while (holds.length > 1 && dormant(holds[0])) { holds.shift(); times.shift(); }
         while (holds.length > 1 && dormant(holds[holds.length - 1])) { holds.pop(); times.pop(); }
+    }
+    // The clip's only genuine low-motion run was itself a resting pose (e.g. a
+    // sign whose real gesture is continuous hand-shape motion with no static
+    // pause, so the only "hold" segmentation can find is before/after it) -
+    // as uninformative as finding no hold at all, so fall back the same way.
+    if (holds.every(dormant)) {
+        const fb = raisedFrameFallback();
+        holds = [fb.pose];
+        times = [((fb.start + fb.end) / 2) * dt];
     }
 
     // Dominant movement direction into each hold (over position/orientation dims).
@@ -903,6 +1410,30 @@ function cosineSim(u, v) {
     for (let i = 0; i < u.length; i++) { dot += u[i] * v[i]; mu += u[i] * u[i]; mv += v[i] * v[i]; }
     if (mu === 0 || mv === 0) return 0;
     return dot / Math.sqrt(mu * mv);
+}
+
+// Metric 3D pose landmarks ("world landmarks" - hip-centered, not 0-1 image-
+// normalized) for the avatar retargeting pipeline. The @mediapipe/holistic
+// CDN build this app loads does NOT expose these under the documented
+// `results.poseWorldLandmarks` name (verified empirically - that property is
+// absent), but the data IS present under an internal, minified property key
+// that isn't a stable public API (and could rename on any future update,
+// since the CDN URL is unpinned). So this detects it by SHAPE instead of by
+// name: a same-length array of 33 landmarks, structurally like poseLandmarks
+// (x/y/z/visibility), but a DIFFERENT array (world landmarks are centered
+// near 0 and can be negative; poseLandmarks are 0-1 normalized image coords).
+function findWorldLandmarks(results) {
+    const pose = results.poseLandmarks;
+    if (!pose) return null;
+    for (const key of Object.keys(results)) {
+        const val = results[key];
+        if (val === pose || !Array.isArray(val) || val.length !== pose.length) continue;
+        const p0 = val[0];
+        if (p0 && typeof p0.x === "number" && typeof p0.y === "number" && typeof p0.z === "number" && typeof p0.visibility === "number") {
+            return val;
+        }
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------

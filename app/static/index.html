@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SignSync ISL - Learn Indian Sign Language with AI</title>
-    <link rel="stylesheet" href="styles.css?v=47">
+    <link rel="stylesheet" href="styles.css?v=54">
 
     <!-- MediaPipe Holistic + camera utilities -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
@@ -21,6 +21,7 @@
         <nav>
             <button id="nav-dashboard" class="active" onclick="switchPage('dashboard')">Dashboard</button>
             <button id="nav-dictionary" onclick="switchPage('dictionary')">Dictionary</button>
+            <button id="nav-sentences" onclick="switchPage('sentences')">Sentences</button>
         </nav>
     </header>
 
@@ -34,7 +35,7 @@
                 <!-- Hero section -->
                 <div class="dashboard-hero glass">
                     <div class="hero-text">
-                        <h1>Namaste, <span id="dash-username">Learner</span>!</h1>
+                        <h1>Welcome, <span id="dash-username">Learner</span>!</h1>
                         <p style="color: var(--text-secondary); font-size: 1.1rem; margin-top: 0.25rem;">
                             Your Indian Sign Language learning arena is ready. Keep up the momentum!
                         </p>
@@ -89,13 +90,39 @@
             </div>
         </div>
 
+        <!-- ================= SENTENCES SCREEN ================= -->
+        <div id="page-sentences" class="page">
+            <div style="margin-bottom: 2rem;">
+                <h1 style="font-size: 2rem; margin-bottom: 0.5rem;">Sentence Practice</h1>
+                <p style="color: var(--text-secondary);">Sign full sentences in the correct ISL gloss order — the coach checks each word as you go, in sequence.</p>
+            </div>
+
+            <!-- Type your own sentence: matched against the dictionary's own words, in the
+                 order you type them (not a translator - see the words found before practicing). -->
+            <div class="glass" style="padding: 1.5rem; margin-bottom: 2rem;">
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="custom-sentence-input">Type a sentence to practice</label>
+                    <input type="text" id="custom-sentence-input" class="form-input" placeholder="e.g. The dog is big and brown." onkeydown="if(event.key==='Enter') practiceCustomSentence();">
+                </div>
+                <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+                    <button class="btn btn-secondary" style="width:auto; padding:0.7rem 1.25rem;" onclick="generateCustomSentence()">🎲 Auto-generate</button>
+                    <button class="btn btn-primary" style="width:auto; padding:0.7rem 1.5rem;" onclick="practiceCustomSentence()">▶ Practice</button>
+                </div>
+            </div>
+
+            <h2 class="lessons-section-header" style="font-size:1.2rem;">Or choose a sentence</h2>
+            <div class="lessons-list" id="sentences-list-container">
+                <!-- Sentences populated dynamically -->
+            </div>
+        </div>
+
 
 
         <!-- ================= PRACTICE ARENA WORKSPACE ================= -->
         <div id="page-practice" class="page">
             <div class="arena-header">
                 <div class="arena-title">
-                    <button class="btn btn-secondary" onclick="switchPage('dashboard')" style="padding: 0.5rem 1rem; width: auto;">
+                    <button id="btn-arena-back" class="btn btn-secondary" onclick="switchPage('dashboard')" style="padding: 0.5rem 1rem; width: auto;">
                         ← Back
                     </button>
                     <div>
@@ -107,6 +134,9 @@
                     Sign description and tips.
                 </div>
             </div>
+
+            <!-- Sentence mode: ordered gloss-word progress strip (hidden outside sentence sessions) -->
+            <div id="sentence-gloss-strip" style="display:none; flex-wrap:wrap; gap:0.5rem; margin-bottom:1rem;"></div>
 
             <!-- Mannequin and Webcam Viewports -->
             <div class="arena-grid">
@@ -165,7 +195,7 @@
                     
                     <div class="accuracy-gauge">
                         <div class="accuracy-score" id="coach-score-display">--%</div>
-                        <div class="accuracy-label">Similarity</div>
+                        <div class="accuracy-label">Best Score This Session</div>
                     </div>
                     
                     <div class="coach-divider" style="width: 1px; height: 50px; background: var(--border-color);"></div>
@@ -218,7 +248,7 @@
     <div id="global-alert" class="alert-popup">Alert text</div>
 
     <!-- Application scripts -->
-    <script src="app.js?v=47"></script>
-    <script src="coach.js?v=47"></script>
+    <script src="app.js?v=54"></script>
+    <script src="coach.js?v=54"></script>
 </body>
 </html>

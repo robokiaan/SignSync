@@ -4,7 +4,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.database import engine, Base, SessionLocal
-from app.models import SignDictionary, Lesson, LessonItem
+from app.models import SignDictionary, Lesson, LessonItem, Sentence, SentenceGlossItem
 
 # Maps each sign to a curriculum category. Signs not listed fall back to "General".
 CATEGORIES_MAP = {
@@ -98,8 +98,53 @@ def seed_db():
 
         print(f"Successfully seeded {len(signs_by_cat)} lessons and curriculum items dynamically.")
 
+        seed_sentences(db, {s.sign_name: s for s in db_signs})
+
     finally:
         db.close()
+
+
+def seed_sentences(db, signs_by_name):
+    """Seed the curated Sentences practice content (app/sentences.json), each a
+    {english, difficulty, gloss} entry where every gloss word must already be a
+    seeded SignDictionary entry (case-insensitive). Words not in the dictionary
+    are skipped with a warning rather than raising, so a typo in the manifest
+    can't take down startup seeding."""
+    manifest = os.path.join(os.path.dirname(__file__), "sentences.json")
+    if not os.path.exists(manifest):
+        return
+    import json
+    with open(manifest, "r", encoding="utf-8") as f:
+        entries = json.load(f)
+
+    count = 0
+    for entry in entries:
+        gloss_signs = []
+        for word in entry["gloss"]:
+            sign = signs_by_name.get(word.lower())
+            if not sign:
+                print(f"WARNING: sentence '{entry['english']}' references unknown sign '{word}' - skipping sentence.")
+                gloss_signs = None
+                break
+            gloss_signs.append(sign)
+        if not gloss_signs:
+            continue
+
+        sentence = Sentence(
+            english_text=entry["english"],
+            difficulty_level=entry["difficulty"],
+            category=entry.get("category"),
+        )
+        db.add(sentence)
+        db.commit()
+        db.refresh(sentence)
+
+        for idx, sign in enumerate(gloss_signs):
+            db.add(SentenceGlossItem(sentence_id=sentence.id, sign_id=sign.id, sort_order=idx + 1))
+        db.commit()
+        count += 1
+
+    print(f"Successfully seeded {count} sentences.")
 
 
 if __name__ == "__main__":

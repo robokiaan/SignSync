@@ -32,3 +32,38 @@ class LessonResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SentenceGlossItemResponse(BaseModel):
+    id: int
+    sign_id: int
+    sort_order: int
+    sign: SignResponse
+
+    class Config:
+        from_attributes = True
+
+
+class SentenceResponse(BaseModel):
+    id: int
+    english_text: str
+    difficulty_level: str
+    category: Optional[str] = None
+    items: List[SentenceGlossItemResponse]
+
+    class Config:
+        from_attributes = True
+
+
+class ParseSentenceRequest(BaseModel):
+    text: str
+
+
+class ParseSentenceResponse(BaseModel):
+    gloss: List[str]
+    unmatched: List[str]
+
+
+class GenerateSentenceResponse(BaseModel):
+    english: str
+    gloss: List[str]

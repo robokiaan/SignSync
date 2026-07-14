@@ -687,6 +687,40 @@ select option {
     color: var(--text-primary);
 }
 
+/* Sentence practice: ordered gloss-word progress chips */
+.gloss-chip {
+    font-size: 0.85rem;
+    padding: 0.4rem 0.85rem;
+    border-radius: 20px;
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    text-transform: capitalize;
+}
+.gloss-chip.current {
+    background: rgba(99, 102, 241, 0.15);
+    color: #818cf8;
+    border-color: rgba(99, 102, 241, 0.4);
+}
+.gloss-chip.done {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--success);
+    border-color: rgba(16, 185, 129, 0.2);
+}
+.gloss-chip.flagged {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.3);
+}
+/* Marks the chip as the selected VIEW (see setSentenceViewMode) - a ring
+   rather than a background/color override so it layers on top of a word
+   chip's progress color (done/current/flagged) instead of hiding it. */
+.gloss-chip.view-active {
+    outline: 2px solid var(--secondary);
+    outline-offset: 2px;
+}
+
 /* ===================================================================
    Responsive layout — tablets and phones
    =================================================================== */

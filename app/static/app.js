@@ -426,9 +426,11 @@ async function startPractice(signName, lessonTitle) {
                 });
             };
 
-            // crossOrigin is required so the phase model can read frames off the
-            // canvas when videos are served from another origin (with CORS).
-            video.crossOrigin = "anonymous";
+            // No crossOrigin here on purpose: every sign in the dictionary has a
+            // precomputed phase model (phases.json), so primeReference() never
+            // reads frames off a canvas anymore - and setting crossOrigin on a
+            // cross-origin host that doesn't send CORS headers (e.g. GitHub
+            // Releases) would make the browser refuse to even play the video.
             video.src = `${VIDEO_BASE_URL}/${encodeURIComponent(signKey)}.mp4`;
             video.load();
         }

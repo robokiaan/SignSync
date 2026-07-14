@@ -838,7 +838,9 @@ function loadWordVideo(word) {
     video.pause();
     video.loop = true;
     video.onended = null; // clear any leftover chain handler from "all" mode
-    video.crossOrigin = "anonymous";
+    // No crossOrigin: see the same note in app.js's startPractice - every sign
+    // has a precomputed phase model, so nothing reads canvas frames off this
+    // video anymore, and setting it would break playback on CORS-less hosts.
     video.onloadeddata = () => {
         if (placeholder) placeholder.style.display = "none";
         video.style.display = "block";
@@ -866,7 +868,7 @@ function loadChainedWord(idx) {
     if (!video) return;
     const word = sentenceGloss[idx];
     video.pause();
-    video.crossOrigin = "anonymous";
+    // No crossOrigin: see the same note in app.js's startPractice.
     video.onloadeddata = () => {
         if (placeholder) placeholder.style.display = "none";
         video.style.display = "block";
@@ -1098,18 +1100,25 @@ async function showPhaseFrames() {
     cnv.width = 160; cnv.height = 120;
     const ctx = cnv.getContext("2d");
     const figs = [];
-    for (let i = 0; i < model.holdTimes.length; i++) {
-        const t = Math.min(Math.max(model.holdTimes[i], 0), video.duration - 0.01);
-        await seekVideo(video, t);
-        ctx.drawImage(video, 0, 0, cnv.width, cnv.height);
-        const need = model.requires;
-        figs.push(`<div style="text-align:center;font-size:0.72rem;color:var(--text-secondary);">
-            <img src="${cnv.toDataURL("image/jpeg", 0.7)}" style="width:160px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border-color);">
-            <div style="margin-top:0.25rem;">Phase ${i + 1}/${model.holdTimes.length} · t=${t.toFixed(2)}s</div>
-        </div>`);
-        if (i === 0) figs.unshift(`<div style="align-self:center;font-size:0.72rem;color:var(--text-secondary);padding-right:0.5rem;">needs ${need.hands} hand(s)${need.pose ? " + body" : ""}:</div>`);
+    try {
+        for (let i = 0; i < model.holdTimes.length; i++) {
+            const t = Math.min(Math.max(model.holdTimes[i], 0), video.duration - 0.01);
+            await seekVideo(video, t);
+            ctx.drawImage(video, 0, 0, cnv.width, cnv.height);
+            const need = model.requires;
+            figs.push(`<div style="text-align:center;font-size:0.72rem;color:var(--text-secondary);">
+                <img src="${cnv.toDataURL("image/jpeg", 0.7)}" style="width:160px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border-color);">
+                <div style="margin-top:0.25rem;">Phase ${i + 1}/${model.holdTimes.length} · t=${t.toFixed(2)}s</div>
+            </div>`);
+            if (i === 0) figs.unshift(`<div style="align-self:center;font-size:0.72rem;color:var(--text-secondary);padding-right:0.5rem;">needs ${need.hands} hand(s)${need.pose ? " + body" : ""}:</div>`);
+        }
+        gallery.innerHTML = figs.join("");
+    } catch (e) {
+        // Tainted-canvas SecurityError: the video's host doesn't send CORS
+        // headers, so pixels can't be read back for a thumbnail. Debug-only
+        // feature - degrade to a message instead of an uncaught exception.
+        gallery.innerHTML = `<span style="color:var(--text-secondary)">Can't capture thumbnails - reference video host doesn't allow cross-origin pixel reads.</span>`;
     }
-    gallery.innerHTML = figs.join("");
 
     video.loop = wasLoop;
     try { video.currentTime = t0; } catch (e) { /* ignore */ }

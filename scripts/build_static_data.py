@@ -45,8 +45,16 @@ def build_lessons(signs):
     for s in signs:
         by_cat.setdefault(s["category"], []).append(s)
 
+    # Category order matches CATEGORIES_MAP's own definition order (not
+    # alphabetical - the old DB-backed backend's order was filesystem/manifest
+    # dependent and not reliably reproducible, but CATEGORIES_MAP's order is
+    # deterministic and was clearly deliberately chosen). "General" (the
+    # fallback for unmapped signs, not itself a CATEGORIES_MAP key) goes last.
+    cat_order = [cat.title() for cat in CATEGORIES_MAP] + ["General"]
+    ordered_cats = sorted(by_cat, key=lambda c: cat_order.index(c) if c in cat_order else len(cat_order))
+
     lessons = []
-    for lesson_id, cat in enumerate(sorted(by_cat), start=1):
+    for lesson_id, cat in enumerate(ordered_cats, start=1):
         cat_signs = sorted(by_cat[cat], key=lambda s: s["sign_name"])
         lessons.append({
             "id": lesson_id,

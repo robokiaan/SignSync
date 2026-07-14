@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SignSync ISL</title>
+<script>
+    // GitHub Pages serves this for any path it doesn't have a file for -
+    // which, for a client-routed SPA, is every deep link (e.g.
+    // /dashboard/alright). Redirect to index.html carrying the intended path
+    // in the query string; index.html's inline script restores it via
+    // history.replaceState before app.js's router runs.
+    // Pattern: https://github.com/rafgraph/spa-github-pages
+    var path = location.pathname + location.search + location.hash;
+    location.replace("/index.html?redirect=" + encodeURIComponent(path));
+</script>
+</head>
+<body></body>
+</html>

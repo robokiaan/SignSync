@@ -30,3 +30,4 @@ Thumbs.db
 
 # Regeneratable intermediate artifacts
 scripts/contact_sheets/
+app/static/data/

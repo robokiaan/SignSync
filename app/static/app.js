@@ -8,6 +8,71 @@ let activeSign = null;
 // phase model draws each frame to a canvas (cross-origin video would taint it).
 const VIDEO_BASE_URL = "/videos";
 
+// Site content (dictionary/lessons/sentences) baked to static JSON by
+// scripts/build_static_data.py - there's no backend on GitHub Pages to serve
+// /api/* at request time, so this loads once and everything below reads from
+// it in memory instead of fetching per page. dictionaryByName + aliasIndex
+// (gloss_matching.js) back sentence lookup/parsing the same way the old
+// /api/dictionary/{name} and /api/sentences/parse endpoints did server-side.
+let siteData = null;
+let dictionaryByName = new Map();
+let aliasIndex = new Map();
+let siteDataPromise = null;
+
+function loadSiteData() {
+    if (!siteDataPromise) {
+        siteDataPromise = Promise.all([
+            fetch("/data/dictionary.json").then((r) => r.json()),
+            fetch("/data/lessons.json").then((r) => r.json()),
+            fetch("/data/sentences.json").then((r) => r.json()),
+        ]).then(([dictionary, lessons, sentences]) => {
+            siteData = { dictionary, lessons, sentences };
+            dictionaryByName = new Map(dictionary.map((s) => [s.sign_name, s]));
+            aliasIndex = buildAliasIndex(dictionary.map((s) => s.sign_name));
+        });
+    }
+    return siteDataPromise;
+}
+
+// Template-based random sentence synthesis (not a translator, not an LLM
+// call) for the "Auto-generate" button - JS port of the same templates
+// main.py used to run server-side. English + gloss are produced together so
+// there's no parsing ambiguity for generated text.
+const PRONOUN_COPULA = {
+    "i": "am", "you": "are", "he": "is", "she": "is", "it": "is",
+    "we": "are", "they": "are", "you (plural)": "are",
+};
+
+function titleCase(s) {
+    return s.replace(/\w\S*/g, (w) => w[0].toUpperCase() + w.slice(1));
+}
+
+const GENERATE_TEMPLATES = [
+    ["Pronouns", "Adjectives", (a, b) => `${titleCase(a)} ${PRONOUN_COPULA[a] || "is"} ${b}.`],
+    ["People", "Adjectives", (a, b) => `${titleCase(a)} is ${b}.`],
+    ["Days And Time", "Adjectives", (a, b) => `${titleCase(a)} is ${b}.`],
+    ["Animals", "Adjectives", (a, b) => `The ${a} is ${b}.`],
+    ["Clothes", "Adjectives", (a, b) => `The ${a} is ${b}.`],
+    ["Transportation", "Adjectives", (a, b) => `The ${a} is ${b}.`],
+    ["Jobs", "Adjectives", (a, b) => `The ${a} is ${b}.`],
+    ["Places", "Adjectives", (a, b) => (a === "india" ? `${titleCase(a)} is ${b}.` : `The ${a} is ${b}.`)],
+    ["Animals", "Colours", (a, b) => `The ${a} is ${b}.`],
+];
+
+function randomSignInCategory(cat) {
+    const pool = siteData.dictionary.filter((s) => s.category === cat);
+    if (pool.length === 0) return null;
+    return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function generateSentence() {
+    const [catA, catB, formatter] = GENERATE_TEMPLATES[Math.floor(Math.random() * GENERATE_TEMPLATES.length)];
+    const signA = randomSignInCategory(catA);
+    const signB = randomSignInCategory(catB);
+    if (!signA || !signB) return null;
+    return { english: formatter(signA.sign_name, signB.sign_name), gloss: [signA.sign_name, signB.sign_name] };
+}
+
 // URL routing: deep-linkable /dashboard/<sign> and /sentences/<slug>, plus
 // plain /dashboard, /dictionary, /sentences for the list pages. The "practice"
 // page itself has no route of its own - whichever sign/sentence started the
@@ -27,6 +92,7 @@ function setUrl(path) {
 async function handleRoute(path) {
     suppressUrlUpdate = true;
     try {
+        await loadSiteData();
         const parts = path.split("/").filter(Boolean);
         if (parts[0] === "dashboard" && parts[1]) {
             const ok = await startPractice(decodeURIComponent(parts[1]), "Dashboard");
@@ -110,9 +176,8 @@ function showAlert(message, type = "success") {
 // Load Lessons in Dashboard
 async function loadLessons() {
     try {
-        const response = await fetch("/api/lessons");
-        if (!response.ok) return;
-        const lessons = await response.json();
+        await loadSiteData();
+        const lessons = [...siteData.lessons];
 
         // Sort lessons: Beginner -> Intermediate -> Advanced
         const difficultyOrder = { beginner: 1, intermediate: 2, advanced: 3 };
@@ -160,12 +225,12 @@ async function loadLessons() {
 // Load Dictionary Grid
 async function loadDictionary() {
     const category = document.getElementById("dict-category-select").value;
-    const url = category ? `/api/dictionary?category=${encodeURIComponent(category)}` : "/api/dictionary";
 
     try {
-        const response = await fetch(url);
-        if (!response.ok) return;
-        const signs = await response.json();
+        await loadSiteData();
+        const signs = category
+            ? siteData.dictionary.filter((s) => s.category === category)
+            : siteData.dictionary;
         const container = document.getElementById("dictionary-container");
         container.innerHTML = "";
 
@@ -193,9 +258,8 @@ async function loadDictionary() {
 // Load Sentences List
 async function loadSentences() {
     try {
-        const response = await fetch("/api/sentences");
-        if (!response.ok) return;
-        const sentences = await response.json();
+        await loadSiteData();
+        const sentences = [...siteData.sentences];
 
         const difficultyOrder = { beginner: 1, intermediate: 2, advanced: 3 };
         sentences.sort((a, b) => {
@@ -265,12 +329,12 @@ function enterSentenceArena(englishText, glossWords, slug) {
 // (incl. the URL router) know whether to fall back to the sentences list.
 async function startSentencePractice(sentenceId) {
     try {
-        const response = await fetch(`/api/sentences/${sentenceId}`);
-        if (!response.ok) {
+        await loadSiteData();
+        const sentence = siteData.sentences.find((s) => s.id === sentenceId);
+        if (!sentence) {
             showAlert("Error loading sentence.", "error");
             return false;
         }
-        const sentence = await response.json();
         const glossWords = sentence.items.map((item) => item.sign.sign_name.toLowerCase());
         enterSentenceArena(sentence.english_text, glossWords, sentence.slug);
         return true;
@@ -285,12 +349,12 @@ async function startSentencePractice(sentenceId) {
 // what deep-linking to /sentences/<slug> uses.
 async function startSentencePracticeBySlug(slug) {
     try {
-        const response = await fetch(`/api/sentences/by-slug/${encodeURIComponent(slug)}`);
-        if (!response.ok) {
+        await loadSiteData();
+        const sentence = siteData.sentences.find((s) => s.slug === slug);
+        if (!sentence) {
             showAlert("Error loading sentence.", "error");
             return false;
         }
-        const sentence = await response.json();
         const glossWords = sentence.items.map((item) => item.sign.sign_name.toLowerCase());
         enterSentenceArena(sentence.english_text, glossWords, sentence.slug);
         return true;
@@ -306,12 +370,12 @@ async function startSentencePracticeBySlug(slug) {
 // whatever's actually in the box, so editing the suggestion can't go stale.
 async function generateCustomSentence() {
     try {
-        const response = await fetch("/api/sentences/generate");
-        if (!response.ok) {
+        await loadSiteData();
+        const data = generateSentence();
+        if (!data) {
             showAlert("Could not generate a sentence.", "error");
             return;
         }
-        const data = await response.json();
         document.getElementById("custom-sentence-input").value = data.english;
     } catch (err) {
         console.error("Error generating sentence:", err);
@@ -331,16 +395,8 @@ async function practiceCustomSentence() {
         return;
     }
     try {
-        const response = await fetch("/api/sentences/parse", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text }),
-        });
-        if (!response.ok) {
-            showAlert("Could not parse that sentence.", "error");
-            return;
-        }
-        const { gloss, unmatched } = await response.json();
+        await loadSiteData();
+        const { gloss, unmatched } = parseSentence(text, aliasIndex);
         if (gloss.length === 0) {
             showAlert("No dictionary words found — try simpler words, like the ones in the Dictionary tab.", "error");
             return;
@@ -359,12 +415,13 @@ async function practiceCustomSentence() {
 // router) know whether to fall back to a list page.
 async function startPractice(signName, lessonTitle) {
     try {
-        const response = await fetch(`/api/dictionary/${encodeURIComponent(signName)}`);
-        if (!response.ok) {
+        await loadSiteData();
+        const sign = dictionaryByName.get(signName.toLowerCase());
+        if (!sign) {
             showAlert("Error loading sign.", "error");
             return false;
         }
-        activeSign = await response.json();
+        activeSign = sign;
         endSentenceSession();
         document.getElementById("btn-arena-back").onclick = () => switchPage("dashboard");
 
@@ -390,16 +447,12 @@ async function startPractice(signName, lessonTitle) {
             document.getElementById("video-placeholder-text").innerHTML = `Loading reference video for <strong>${activeSign.sign_name}</strong>...`;
 
             video.onerror = () => {
-                fetch("/api/log-error", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        sign: activeSign.sign_name,
-                        code: video.error ? video.error.code : null,
-                        message: video.error ? video.error.message : "unknown",
-                        src: video.src,
-                    }),
-                }).catch((err) => console.error(err));
+                console.error("Reference video failed to load:", {
+                    sign: activeSign.sign_name,
+                    code: video.error ? video.error.code : null,
+                    message: video.error ? video.error.message : "unknown",
+                    src: video.src,
+                });
 
                 placeholder.style.display = "block";
                 document.getElementById("video-placeholder-text").innerHTML = `

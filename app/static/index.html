@@ -6,6 +6,19 @@
     <title>SignSync ISL - Learn Indian Sign Language with AI</title>
     <link rel="stylesheet" href="/styles.css?v=55">
 
+    <!-- GitHub Pages has no server-side rewrites, so a direct hit on a client
+    route (e.g. /dashboard/alright) 404s and lands on 404.html, which redirects
+    here with the intended path in ?redirect=. Restore it via replaceState
+    before app.js's router runs (it dispatches off location.pathname on
+    DOMContentLoaded, which fires after this). No-op when nothing set it -
+    e.g. served by Render, whose server-side fallback never needs this. -->
+    <script>
+        (function () {
+            var redirect = new URLSearchParams(location.search).get("redirect");
+            if (redirect) history.replaceState(null, "", redirect);
+        })();
+    </script>
+
     <!-- MediaPipe Holistic + camera utilities -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
@@ -70,7 +83,7 @@
                         <option value="Pronouns">Pronouns</option>
                         <option value="Colours">Colours</option>
                         <option value="Seasons">Seasons</option>
-                        <option value="Days and Time">Days and Time</option>
+                        <option value="Days And Time">Days and Time</option>
                         <option value="Animals">Animals</option>
                         <option value="Clothes">Clothes</option>
                         <option value="Places">Places</option>
@@ -248,7 +261,8 @@
     <div id="global-alert" class="alert-popup">Alert text</div>
 
     <!-- Application scripts -->
-    <script src="/app.js?v=56"></script>
+    <script src="/gloss_matching.js?v=1"></script>
+    <script src="/app.js?v=57"></script>
     <script src="/coach.js?v=56"></script>
 </body>
 </html>

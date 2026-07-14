@@ -253,4 +253,16 @@ async def spa_fallback(request, exc):
     return await http_exception_handler(request, exc)
 
 
+# Explicit route for "/" so it gets the same no-cache treatment as the SPA
+# fallback above - StaticFiles' own html=True auto-serve of index.html sets
+# no Cache-Control at all, which left it to browser heuristic caching. That's
+# exactly what caused app.js/styles.css edits to keep silently serving stale
+# during this session's testing: an old cached index.html referencing old
+# ?v=NN asset URLs is itself never invalidated, and each ?v=NN URL is cached
+# forever once fetched once. Declared before the mount so it takes priority.
+@app.get("/")
+async def index():
+    return FileResponse(os.path.join(static_dir, "index.html"), headers={"Cache-Control": "no-cache"})
+
+
 app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")

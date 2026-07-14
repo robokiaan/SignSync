@@ -57,15 +57,20 @@ let missingLimbFrames = 0;     // consecutive frames missing a required limb (de
 let lastDisplayScore = 0;      // last score shown (kept while prompting for limbs)
 let prevUserSmoothed = null;   // last smoothed user frame, for feature EMA
 
-// Sentence-practice session state (reset in endSentenceSession). The learner
-// signs each word of `sentenceGloss` in order, reusing the single-sign phase
-// state machine above (activePhaseModel/phaseBest/phaseReached/curPhase) for
-// whichever word is current - see analyzeSentenceFeedback().
+// Sentence-practice session state (reset in endSentenceSession). The whole
+// sentence is graded as ONE multi-phase model (sentenceCombinedModel - every
+// word's holds concatenated in order), reusing the exact same phase state
+// machine single-sign practice uses (activePhaseModel/phaseBest/phaseReached/
+// curPhase, scoreActiveModel) rather than resetting to a fresh 1-3-phase
+// model per word. That's deliberate: a lone word's score is coarse (few
+// phases to average over, so it reads as near-binary), while the combined
+// model spans every phase of every word, giving the same per-phase-quality
+// averaging individual signs get, just with more phases feeding it - a
+// smoother, more accurate percentage instead of one that resets each word.
 let sentenceActive = false;         // is a sentence session in progress?
 let sentenceGloss = [];             // ordered lowercase sign names for the active sentence
-let curWordIdx = 0;                 // index into sentenceGloss the learner is working toward
-let wordReached = [];               // per-word: has it been completed?
-let wordBestScore = [];             // per-word: best display score achieved
+let sentenceCombinedModel = null;   // {holds, moveDirs, holdTimes, requires, wordPhaseRanges} spanning the whole sentence
+let savedFocusStash = null;         // combined-model phaseBest/phaseReached/phaseUserPose/curPhase, saved while a single-word focus view (setSentenceViewMode) borrows the shared scoring state
 let misclassifyStreak = 0;          // consecutive frames the classifier saw a DIFFERENT word than expected
 let lastMisclassifiedWord = null;   // that word, for the "looks like X" feedback message
 let sentenceViewMode = "all";       // sentence-mode view selector; "all" is the default and only mode today
@@ -148,9 +153,10 @@ function onHolisticResults(results) {
     drawCustomSkeleton(results);
 
     if (sentenceActive) {
-        // "all" = order-gated whole-sentence scoring; a specific focused word
+        // "all" = combined whole-sentence scoring; a specific focused word
         // reuses the plain single-sign scorer (activePhaseModel already points
-        // at that word - see focusOnWord) without touching curWordIdx/wordReached.
+        // at that word - see focusOnWord) without touching the combined model's
+        // saved progress (savedFocusStash, restored by resumeCombinedModel).
         if (sentenceViewMode === "all") analyzeSentenceFeedback(results);
         else analyzeFeedback(results);
     } else if (activeSign) {
@@ -715,15 +721,67 @@ function analyzeFeedback(results) {
     updateCoachDebug({ P, curPhase, q, displayScore, worstIdx, worstDiff });
 }
 
+// Concatenates every word's precomputed holds into one ordered phase
+// sequence, so the whole sentence scores through scoreActiveModel exactly
+// like a single multi-phase sign. wordPhaseRanges[i] = [start, end) into the
+// combined holds array for sentenceGloss[i], used to map a phase index back
+// to "which word is this" (currentWordIndex) and to per-word done-ness
+// (isWordDone) for the gloss-strip UI.
+function buildCombinedPhaseModel(words) {
+    const holds = [];
+    const moveDirs = [];
+    const holdTimes = [];
+    let handsMax = 0;
+    let poseNeeded = false;
+    const wordPhaseRanges = [];
+
+    for (const word of words) {
+        const model = phaseCache[word];
+        const start = holds.length;
+        if (model && model.holds && model.holds.length) {
+            holds.push(...model.holds);
+            moveDirs.push(...model.moveDirs);
+            holdTimes.push(...model.holdTimes);
+            handsMax = Math.max(handsMax, model.requires.hands);
+            poseNeeded = poseNeeded || model.requires.pose;
+        }
+        wordPhaseRanges.push([start, holds.length]);
+    }
+
+    return { holds, moveDirs, holdTimes, requires: { hands: handsMax, pose: poseNeeded }, wordPhaseRanges };
+}
+
+// Which sentenceGloss word the combined model's curPhase currently belongs
+// to - derived from curPhase rather than tracked as separate state, so it's
+// never at risk of drifting out of sync with the actual phase progress.
+function currentWordIndex() {
+    if (!sentenceCombinedModel) return 0;
+    const ranges = sentenceCombinedModel.wordPhaseRanges;
+    for (let i = 0; i < ranges.length; i++) {
+        if (curPhase >= ranges[i][0] && curPhase < ranges[i][1]) return i;
+    }
+    return ranges.length - 1; // curPhase past the last range - sentence is done, report the last word
+}
+
+function isWordDone(i) {
+    if (!sentenceCombinedModel) return false;
+    const [start, end] = sentenceCombinedModel.wordPhaseRanges[i];
+    for (let p = start; p < end; p++) {
+        if (!phaseReached[p]) return false;
+    }
+    return end > start;
+}
+
 // ---------------------------------------------------------------------------
 // Sentence practice: sign a full sentence in the correct ISL gloss order.
-// The learner must complete each gloss word (via the same phase state machine
-// as single-sign practice) to advance - order is enforced structurally, not
-// just suggested. On top of that, every frame is ALSO classified against every
-// OTHER word in the sentence (nearest-neighbor over the same matchHold/pose-
-// distance function, scoped to this sentence's own words rather than the full
-// 262-sign dictionary) so a learner performing the wrong word gets told what
-// it looked like instead of a generic "keep trying". Word phase models come
+// Graded as one combined multi-phase model (buildCombinedPhaseModel) via the
+// same phase state machine single-sign practice uses - order is enforced
+// structurally (phases only advance in sequence), not just suggested. On top
+// of that, every frame is ALSO classified against every OTHER word in the
+// sentence (nearest-neighbor over the same matchHold/pose-distance function,
+// scoped to this sentence's own words rather than the full 262-sign
+// dictionary) so a learner performing the wrong word gets told what it
+// looked like instead of a generic "keep trying". Word phase models come
 // straight from the precomputed phases.json fetch (`precomputedPhasesPromise`)
 // - unlike primeReference()'s per-sign lazy caching, we need every gloss word
 // available at once, so they're copied into `phaseCache` up front here rather
@@ -738,14 +796,15 @@ async function beginSentenceSession(englishText, glossSignNames) {
             phaseCache[word] = precomputed[word];
         }
     }
-    curWordIdx = 0;
-    wordReached = new Array(sentenceGloss.length).fill(false);
-    wordBestScore = new Array(sentenceGloss.length).fill(0);
     misclassifyStreak = 0;
     lastMisclassifiedWord = null;
     sentenceActive = true;
 
-    loadCurrentWord();
+    sentenceCombinedModel = buildCombinedPhaseModel(sentenceGloss);
+    savedFocusStash = null;
+    activePhaseModel = sentenceCombinedModel;
+    resetPhaseProgress();
+
     renderGlossStrip();
     applyViewMode();
 
@@ -757,9 +816,8 @@ async function beginSentenceSession(englishText, glossSignNames) {
 function endSentenceSession() {
     sentenceActive = false;
     sentenceGloss = [];
-    curWordIdx = 0;
-    wordReached = [];
-    wordBestScore = [];
+    sentenceCombinedModel = null;
+    savedFocusStash = null;
     misclassifyStreak = 0;
     lastMisclassifiedWord = null;
     sentenceViewMode = "all"; // next sentence session always starts on the default view
@@ -773,6 +831,9 @@ function endSentenceSession() {
     const video = document.getElementById("practice-ref-video");
     if (video) video.onended = null;
 
+    const prefetch = document.getElementById("practice-ref-video-prefetch");
+    if (prefetch) prefetch.removeAttribute("src");
+
     const gallery = document.getElementById("phase-frames");
     if (gallery) {
         gallery.style.display = "none";
@@ -783,18 +844,23 @@ function endSentenceSession() {
 // Sentence-mode view selector - chips rendered into #sentence-gloss-strip (see
 // renderGlossStrip): "all" (default) or a specific gloss word. Selecting a
 // word switches the coach into plain single-sign scoring for THAT word alone
-// (activePhaseModel repointed, curWordIdx/wordReached untouched - see the
-// onHolisticResults dispatch), so free-practicing a word out of order never
-// corrupts the order-gated "all" progress; switching back to "all" resumes it
-// exactly where it was.
+// (activePhaseModel repointed via focusOnWord, which - like single-sign
+// practice - resets the shared phaseBest/phaseReached/curPhase state). Since
+// that state is shared with the combined model's own progress, entering focus
+// mode first stashes it (savedFocusStash) so free-practicing a word out of
+// order can't corrupt the order-gated "all" progress; switching back to "all"
+// (resumeCombinedModel) restores it, resuming exactly where it was.
 function setSentenceViewMode(mode) {
     sentenceViewMode = mode;
     renderGlossStrip();
     if (!sentenceActive) return;
 
     if (mode === "all") {
-        loadCurrentWord(); // repoint activePhaseModel at curWordIdx's word
+        resumeCombinedModel();
     } else {
+        if (!savedFocusStash) {
+            savedFocusStash = { phaseBest, phaseReached, phaseUserPose, curPhase };
+        }
         focusOnWord(mode); // repoint activePhaseModel at the selected word
     }
     applyViewMode();
@@ -802,7 +868,7 @@ function setSentenceViewMode(mode) {
 
 // Drives the reference-video display + phase-frame gallery for whichever mode
 // is active. Scoring state (activePhaseModel etc.) is set separately by
-// loadCurrentWord()/focusOnWord() before this is called.
+// resumeCombinedModel()/focusOnWord() before this is called.
 function applyViewMode() {
     if (sentenceViewMode === "all") {
         playCombinedVideo();
@@ -813,17 +879,20 @@ function applyViewMode() {
     }
 }
 
-// Point the active phase model at the current (curWordIdx) word - the "all"
-// mode's order-gated scoring target. Video display is handled separately by
+// Point the active phase model back at the whole-sentence combined model and
+// restore its progress if a focus-word excursion stashed it (see
+// setSentenceViewMode). Video display is handled separately by
 // applyViewMode()/playCombinedVideo(), not here.
-function loadCurrentWord() {
-    const word = sentenceGloss[curWordIdx];
-    activePhaseModel = phaseCache[word] || null;
-    resetPhaseProgress();
+function resumeCombinedModel() {
+    activePhaseModel = sentenceCombinedModel;
+    if (savedFocusStash) {
+        ({ phaseBest, phaseReached, phaseUserPose, curPhase } = savedFocusStash);
+        savedFocusStash = null;
+    }
 }
 
 // Point the active phase model at an arbitrary gloss word for free practice,
-// independent of curWordIdx/order-gating (see setSentenceViewMode above).
+// independent of the combined model's order-gating (see setSentenceViewMode).
 function focusOnWord(word) {
     activePhaseModel = phaseCache[word] || null;
     resetPhaseProgress();
@@ -851,8 +920,10 @@ function loadWordVideo(word) {
 }
 
 // "All" view mode: chain every gloss word's reference clip into one continuous
-// looping playback, independent of the learner's scoring progress (curWordIdx/
-// activePhaseModel keep tracking exactly as before via loadCurrentWord above).
+// looping playback - dormant pose (each clip's own natural rest bookend) into
+// sign 1, sign 2, ... back to a dormant pose, then wraps to sign 1 again -
+// independent of the learner's scoring progress (activePhaseModel keeps
+// tracking exactly as before via resumeCombinedModel/beginSentenceSession).
 function playCombinedVideo() {
     const video = document.getElementById("practice-ref-video");
     if (!video || sentenceGloss.length === 0) return;
@@ -862,6 +933,9 @@ function playCombinedVideo() {
     loadChainedWord(videoChainIdx);
 }
 
+// Loads word[idx] into the visible video AND kicks off prefetchNextChainedWord
+// so the FOLLOWING word is already warmed in the browser's cache by the time
+// it's needed - see the #practice-ref-video-prefetch comment in index.html.
 function loadChainedWord(idx) {
     const video = document.getElementById("practice-ref-video");
     const placeholder = document.getElementById("video-placeholder");
@@ -873,9 +947,25 @@ function loadChainedWord(idx) {
         if (placeholder) placeholder.style.display = "none";
         video.style.display = "block";
         video.play().catch(() => {});
+        prefetchNextChainedWord(idx);
     };
     video.src = `${VIDEO_BASE_URL}/${encodeURIComponent(word)}.mp4`;
     video.load();
+}
+
+// Warms the browser's HTTP cache for whatever chain word comes after `idx`
+// (wrapping back to word 0, same as handleChainedVideoEnded) by loading it
+// into a hidden, never-played video element while the current clip is still
+// playing. That gives the whole rest of the current clip's duration for the
+// fetch to finish, so when handleChainedVideoEnded later sets the VISIBLE
+// video's src to that same URL, the browser serves it from cache instead of
+// starting a fresh network fetch - eliminating the black gap between clips.
+function prefetchNextChainedWord(idx) {
+    const pre = document.getElementById("practice-ref-video-prefetch");
+    if (!pre || sentenceGloss.length === 0) return;
+    const nextWord = sentenceGloss[(idx + 1) % sentenceGloss.length];
+    pre.src = `${VIDEO_BASE_URL}/${encodeURIComponent(nextWord)}.mp4`;
+    pre.load();
 }
 
 function handleChainedVideoEnded() {
@@ -897,7 +987,7 @@ function renderGlossStrip() {
     strip.style.display = "flex";
     const wordChips = sentenceGloss
         .map((word, i) => {
-            const progressCls = wordReached[i] ? "done" : "";
+            const progressCls = isWordDone(i) ? "done" : "";
             const selectedCls = sentenceViewMode === word ? "view-active" : "";
             return `<span class="gloss-chip ${progressCls} ${selectedCls}" style="cursor:pointer;" onclick="setSentenceViewMode('${word}')" title="Focus this word: its own video, phase frames, and camera check">${i + 1}. ${word}</span>`;
         })
@@ -907,7 +997,9 @@ function renderGlossStrip() {
 }
 
 function analyzeSentenceFeedback(results) {
-    if (curWordIdx >= sentenceGloss.length) return; // sentence already complete - leave the summary showing
+    // Sentence already complete (every phase of the combined model reached) -
+    // leave the summary showing instead of re-scoring.
+    if (phaseReached.length && phaseReached.every(Boolean)) return;
 
     const user = smoothUserFrame(extractFrameFeatures(results));
 
@@ -932,14 +1024,15 @@ function analyzeSentenceFeedback(results) {
 
     const result = scoreActiveModel(user);
     lastDisplayScore = result.displayScore;
+    const curIdx = currentWordIndex();
 
     // Classification pass: does the learner look more like a DIFFERENT gloss
     // word than the one currently expected? Nearest-neighbor over each
     // candidate word's own precomputed holds, scoped to this sentence's words.
-    let bestWord = sentenceGloss[curWordIdx];
+    let bestWord = sentenceGloss[curIdx];
     let bestQ = Math.max(...result.q, 0);
     for (let i = 0; i < sentenceGloss.length; i++) {
-        if (i === curWordIdx) continue;
+        if (i === curIdx) continue;
         const model = phaseCache[sentenceGloss[i]];
         if (!model || !model.holds.length) continue;
         const q = Math.max(...model.holds.map((h) => matchHold(user, h).q));
@@ -948,7 +1041,7 @@ function analyzeSentenceFeedback(results) {
             bestWord = sentenceGloss[i];
         }
     }
-    if (bestWord !== sentenceGloss[curWordIdx]) {
+    if (bestWord !== sentenceGloss[curIdx]) {
         misclassifyStreak++;
         lastMisclassifiedWord = bestWord;
     } else {
@@ -958,8 +1051,8 @@ function analyzeSentenceFeedback(results) {
 
     if (misclassifyStreak >= 3 && lastMisclassifiedWord) {
         const idx = sentenceGloss.indexOf(lastMisclassifiedWord);
-        const where = idx < curWordIdx ? "you already signed that" : "that comes later in this sentence";
-        const msg = `That looked like "${lastMisclassifiedWord}" — ${where}. We're on "${sentenceGloss[curWordIdx]}" now.`;
+        const where = idx < curIdx ? "you already signed that" : "that comes later in this sentence";
+        const msg = `That looked like "${lastMisclassifiedWord}" — ${where}. We're on "${sentenceGloss[curIdx]}" now.`;
         document.getElementById("coach-feedback-status").textContent = "Out of order?";
         document.getElementById("coach-feedback-message").textContent = msg;
         document.getElementById("coach-score-display").textContent = `${result.displayScore}%`;
@@ -967,41 +1060,37 @@ function analyzeSentenceFeedback(results) {
     } else {
         document.getElementById("coach-feedback-status").textContent = `Score: ${result.displayScore}%`;
         document.getElementById("coach-feedback-message").textContent = result.allPhasesReached
-            ? `"${sentenceGloss[curWordIdx]}" matched!`
-            : `Sign "${sentenceGloss[curWordIdx]}" (word ${curWordIdx + 1}/${sentenceGloss.length}).`;
+            ? "Sentence complete!"
+            : `Sign "${sentenceGloss[curIdx]}" (word ${curIdx + 1}/${sentenceGloss.length}).`;
         document.getElementById("coach-score-display").textContent = `${result.displayScore}%`;
     }
 
-    updateSentenceDebug(result, bestWord, bestQ);
+    updateSentenceDebug(result, bestWord, bestQ, curIdx);
+    renderGlossStrip(); // isWordDone() reads live phaseReached, so this can change any frame, not just on completion
 
     if (result.allPhasesReached) {
-        wordReached[curWordIdx] = true;
-        wordBestScore[curWordIdx] = result.displayScore;
-        curWordIdx++;
-        if (curWordIdx < sentenceGloss.length) {
-            loadCurrentWord();
-        } else {
-            finishSentenceSession();
-        }
-        renderGlossStrip();
+        finishSentenceSession(result.displayScore);
     }
 }
 
-function finishSentenceSession() {
-    const avg = Math.round(wordBestScore.reduce((a, b) => a + b, 0) / wordBestScore.length);
+// finalScore is the combined model's own displayScore at the moment every
+// phase was reached - same aggregate-over-phases computation single-sign
+// practice uses (scoreActiveModel), just fed more phases (every word's, not
+// one), so it's already "the sentence score" with no separate averaging step.
+function finishSentenceSession(finalScore) {
     document.getElementById("coach-feedback-status").textContent = "Sentence complete!";
     document.getElementById("coach-feedback-message").textContent =
-        `All ${sentenceGloss.length} words matched — average score ${avg}%.`;
-    document.getElementById("coach-score-display").textContent = `${avg}%`;
+        `All ${sentenceGloss.length} words matched — score ${finalScore}%.`;
+    document.getElementById("coach-score-display").textContent = `${finalScore}%`;
     speakFeedback("Great job! You signed the whole sentence.");
 }
 
-function updateSentenceDebug(result, bestWord, bestQ) {
+function updateSentenceDebug(result, bestWord, bestQ, curIdx) {
     if (!coachDebug) return;
     const el = document.getElementById("coach-debug");
     if (!el) return;
     el.textContent =
-        `word ${curWordIdx + 1}/${sentenceGloss.length} "${sentenceGloss[curWordIdx]}" | ` +
+        `word ${curIdx + 1}/${sentenceGloss.length} "${sentenceGloss[curIdx]}" | phase ${curPhase + 1}/${result.P} | ` +
         `score ${result.displayScore}% | classifier top match: ${bestWord} (${Math.round(bestQ * 100)}%)`;
 }
 

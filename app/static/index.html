@@ -160,6 +160,13 @@
                     
                     <div id="video-viewport-container" style="position: relative; width: 100%; height: 400px; background: #000; overflow: hidden; border-radius: 12px; border: 1px solid var(--border-color);">
                         <video id="practice-ref-video" style="width: 100%; height: 100%; object-fit: contain; display: none;" loop playsinline></video>
+                        <!-- Never shown/played - sentence mode's video chain (coach.js loadChainedWord)
+                             loads the NEXT clip's URL into this element while the current one is still
+                             playing, so it's already in the browser's HTTP cache by the time the visible
+                             element needs to switch to it. Without this, swapping practice-ref-video's src
+                             mid-chain has to fetch over the network from a cold start, which is the black
+                             flash between signs. -->
+                        <video id="practice-ref-video-prefetch" style="display: none;" muted preload="auto" playsinline></video>
                         <div id="video-placeholder" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: var(--text-secondary); width: 80%;">
                             <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">📹</div>
                             <div id="video-placeholder-text">Please place the raw video file at: <br><code style="color:#ef4444;">app/static/videos/{sign}.mp4</code> (or <code>.MOV</code>) to play.</div>
@@ -263,6 +270,6 @@
     <!-- Application scripts -->
     <script src="/gloss_matching.js?v=1"></script>
     <script src="/app.js?v=60"></script>
-    <script src="/coach.js?v=56"></script>
+    <script src="/coach.js?v=57"></script>
 </body>
 </html>

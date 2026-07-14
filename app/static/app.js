@@ -182,15 +182,13 @@ function showAlert(message, type = "success") {
 async function loadLessons() {
     try {
         await loadSiteData();
-        const lessons = [...siteData.lessons];
-
-        // Sort lessons: Beginner -> Intermediate -> Advanced
-        const difficultyOrder = { beginner: 1, intermediate: 2, advanced: 3 };
-        lessons.sort((a, b) => {
-            const diffA = difficultyOrder[a.difficulty_level.toLowerCase()] || 99;
-            const diffB = difficultyOrder[b.difficulty_level.toLowerCase()] || 99;
-            return diffA - diffB;
-        });
+        // siteData.lessons already arrives in the intended display order
+        // (scripts/build_static_data.py's CATEGORY_RELEVANCE_ORDER) - no
+        // client-side re-sort. A difficulty-tier sort used to run here, but
+        // that fought the relevance order (e.g. bumped beginner-tier
+        // Colours ahead of intermediate-tier People despite People ranking
+        // higher for relevance).
+        const lessons = siteData.lessons;
 
         const container = document.getElementById("dashboard-lessons-container");
         container.innerHTML = "";

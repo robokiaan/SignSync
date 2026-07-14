@@ -39,19 +39,28 @@ def build_dictionary():
     return signs
 
 
+# Category order for the dashboard: everyday conversational usefulness to a
+# beginner, most to least - not alphabetical, not CATEGORIES_MAP's definition
+# order. Greetings/Pronouns first (needed in any conversation at all), then
+# common daily vocab, then situational categories, abstract/niche last.
+# "General" (the fallback for signs CATEGORIES_MAP doesn't cover) goes last.
+CATEGORY_RELEVANCE_ORDER = [
+    "Greetings", "Pronouns", "People", "Colours", "Days And Time", "Adjectives",
+    "Home", "Places", "Clothes", "Jobs", "Transportation", "Animals",
+    "Society", "Seasons", "General",
+]
+
+
 def build_lessons(signs):
     by_name = {s["sign_name"]: s for s in signs}
     by_cat = {}
     for s in signs:
         by_cat.setdefault(s["category"], []).append(s)
 
-    # Category order matches CATEGORIES_MAP's own definition order (not
-    # alphabetical - the old DB-backed backend's order was filesystem/manifest
-    # dependent and not reliably reproducible, but CATEGORIES_MAP's order is
-    # deterministic and was clearly deliberately chosen). "General" (the
-    # fallback for unmapped signs, not itself a CATEGORIES_MAP key) goes last.
-    cat_order = [cat.title() for cat in CATEGORIES_MAP] + ["General"]
-    ordered_cats = sorted(by_cat, key=lambda c: cat_order.index(c) if c in cat_order else len(cat_order))
+    ordered_cats = sorted(
+        by_cat,
+        key=lambda c: CATEGORY_RELEVANCE_ORDER.index(c) if c in CATEGORY_RELEVANCE_ORDER else len(CATEGORY_RELEVANCE_ORDER),
+    )
 
     lessons = []
     for lesson_id, cat in enumerate(ordered_cats, start=1):

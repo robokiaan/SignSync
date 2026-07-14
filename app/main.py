@@ -2,9 +2,12 @@ import os
 import random
 from typing import List, Optional
 from fastapi import FastAPI, Depends, HTTPException, Body
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func
+from sqlalchemy import func, inspect, text
 from sqlalchemy.orm import Session, selectinload
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.database import get_db, Base, engine, SessionLocal
 from app.gloss_matching import build_alias_index, parse_sentence
@@ -18,12 +21,55 @@ app = FastAPI(
 )
 
 
+def _migrate_sentence_slugs():
+    """Self-healing migration for the `slug` column added to `sentences` after
+    some hosts already had rows: adds the column if missing (SQLite ALTER),
+    then backfills any NULL slug from that row's own gloss so existing DBs
+    don't need a manual migration step or a reseed."""
+    inspector = inspect(engine)
+    if "sentences" not in inspector.get_table_names():
+        return
+    columns = {c["name"] for c in inspector.get_columns("sentences")}
+    if "slug" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE sentences ADD COLUMN slug VARCHAR(200)"))
+
+    from app.seed import slugify_gloss
+
+    db = SessionLocal()
+    try:
+        missing = (
+            db.query(Sentence)
+            .options(selectinload(Sentence.items).selectinload(SentenceGlossItem.sign))
+            .filter((Sentence.slug.is_(None)) | (Sentence.slug == ""))
+            .all()
+        )
+        if not missing:
+            return
+        used = {
+            row[0] for row in db.query(Sentence.slug).filter(Sentence.slug.isnot(None)).all() if row[0]
+        }
+        for sentence in missing:
+            words = sorted(sentence.items, key=lambda item: item.sort_order)
+            base = slugify_gloss(item.sign.sign_name for item in words) or f"sentence-{sentence.id}"
+            slug, n = base, 2
+            while slug in used:
+                slug = f"{base}-{n}"
+                n += 1
+            sentence.slug = slug
+            used.add(slug)
+        db.commit()
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def seed_if_empty():
     """Ensure tables exist and the dictionary is populated. Lets the app boot
     with data on a fresh host (where the DB is not committed and the filesystem
     may be ephemeral) without a separate seed step."""
     Base.metadata.create_all(bind=engine)
+    _migrate_sentence_slugs()
     db = SessionLocal()
     try:
         # Also reseed if Sentence is empty: on an existing DB where the
@@ -140,6 +186,20 @@ def generate_sentence(db: Session = Depends(get_db)):
     return {"english": english, "gloss": [sign_a.sign_name, sign_b.sign_name]}
 
 
+@app.get("/api/sentences/by-slug/{slug}", response_model=schemas.SentenceResponse)
+def get_sentence_by_slug(slug: str, db: Session = Depends(get_db)):
+    sentence = (
+        db.query(Sentence)
+        .options(selectinload(Sentence.items).selectinload(SentenceGlossItem.sign))
+        .filter(Sentence.slug == slug)
+        .first()
+    )
+    if not sentence:
+        raise HTTPException(status_code=404, detail="Sentence not found.")
+    sentence.items.sort(key=lambda x: x.sort_order)
+    return sentence
+
+
 @app.get("/api/sentences/{sentence_id}", response_model=schemas.SentenceResponse)
 def get_sentence(sentence_id: int, db: Session = Depends(get_db)):
     sentence = (
@@ -165,5 +225,32 @@ def log_browser_error(data: dict = Body(...)):
 static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if not os.path.exists(static_dir):
     os.makedirs(static_dir)
+
+
+# SPA deep-link fallback: client routes like /dashboard/alright or
+# /sentences/i_happy have no matching static file, so StaticFiles 404s them.
+# Serve index.html instead and let app.js's router take it from there. Scoped
+# to real page navigations (Accept: text/html) so a missing asset - e.g. a
+# reference video 404 that <video onerror> depends on - still 404s normally
+# instead of silently getting HTML back.
+@app.exception_handler(StarletteHTTPException)
+async def spa_fallback(request, exc):
+    if (
+        exc.status_code == 404
+        and request.method == "GET"
+        and not request.url.path.startswith("/api")
+        and "text/html" in request.headers.get("accept", "")
+    ):
+        # no-cache: without it, a browser that heuristically cached this
+        # response for one deep-linked path would keep re-serving it (with
+        # whatever asset versions were current then) instead of hitting the
+        # server again after a deploy ships new app.js/styles.css.
+        return FileResponse(os.path.join(static_dir, "index.html"), headers={"Cache-Control": "no-cache"})
+    # Not our fallback case (API 404, non-GET, asset 404, etc.) - defer to
+    # FastAPI's normal JSON error handling. Re-raising exc here would NOT do
+    # that: Starlette doesn't re-dispatch an exception through the handler
+    # that just raised it, so it would surface as an unhandled 500 instead.
+    return await http_exception_handler(request, exc)
+
 
 app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")

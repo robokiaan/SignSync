@@ -93,7 +93,7 @@ let activePrimeId = 0;         // guards against overlapping reference primings
 // in-browser priming entirely instead of running the reference video through
 // Holistic frame-by-frame. Missing/failed fetch just means every sign falls
 // back to live priming, same as before this file existed.
-const precomputedPhasesPromise = fetch("phases.json")
+const precomputedPhasesPromise = fetch("/phases.json")
     .then((r) => (r.ok ? r.json() : {}))
     .catch(() => ({}));
 

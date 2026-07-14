@@ -45,6 +45,7 @@ class Sentence(Base):
     english_text = Column(String(200), nullable=False)
     difficulty_level = Column(String(20), nullable=False)  # 'beginner', 'intermediate', 'advanced'
     category = Column(String(50), nullable=True)
+    slug = Column(String(200), unique=True, nullable=True, index=True)  # e.g. "i_happy", for deep-linkable URLs
 
     items = relationship("SentenceGlossItem", back_populates="sentence", cascade="all, delete-orphan")
 

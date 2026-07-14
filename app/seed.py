@@ -27,6 +27,11 @@ CATEGORIES_MAP = {
 BEGINNER_CATEGORIES = {"Greetings", "Pronouns", "Colours"}
 
 
+def slugify_gloss(sign_names):
+    """URL slug for a sentence, e.g. ["i", "happy"] -> "i_happy"."""
+    return "_".join(name.strip().lower().replace(" ", "-") for name in sign_names)
+
+
 def get_category_for_sign(name):
     lname = name.lower()
     for cat, words in CATEGORIES_MAP.items():
@@ -118,6 +123,7 @@ def seed_sentences(db, signs_by_name):
         entries = json.load(f)
 
     count = 0
+    used_slugs = set()
     for entry in entries:
         gloss_signs = []
         for word in entry["gloss"]:
@@ -130,10 +136,18 @@ def seed_sentences(db, signs_by_name):
         if not gloss_signs:
             continue
 
+        base_slug = slugify_gloss(s.sign_name for s in gloss_signs)
+        slug, n = base_slug, 2
+        while slug in used_slugs:
+            slug = f"{base_slug}-{n}"
+            n += 1
+        used_slugs.add(slug)
+
         sentence = Sentence(
             english_text=entry["english"],
             difficulty_level=entry["difficulty"],
             category=entry.get("category"),
+            slug=slug,
         )
         db.add(sentence)
         db.commit()

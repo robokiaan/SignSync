@@ -49,6 +49,7 @@ class SentenceResponse(BaseModel):
     english_text: str
     difficulty_level: str
     category: Optional[str] = None
+    slug: Optional[str] = None
     items: List[SentenceGlossItemResponse]
 
     class Config:

@@ -8,9 +8,49 @@ let activeSign = null;
 // phase model draws each frame to a canvas (cross-origin video would taint it).
 const VIDEO_BASE_URL = "/videos";
 
-// Initialize App -> straight to the dashboard (no authentication).
+// URL routing: deep-linkable /dashboard/<sign> and /sentences/<slug>, plus
+// plain /dashboard, /dictionary, /sentences for the list pages. The "practice"
+// page itself has no route of its own - whichever sign/sentence started the
+// session owns the URL, set by startPractice/enterSentenceArena below.
+//
+// suppressUrlUpdate guards against feedback loops: handleRoute (run on load
+// and on popstate, i.e. the URL already changed) drives the same
+// switchPage/startPractice/enterSentenceArena calls that normal in-app clicks
+// use, and those calls call setUrl - which must be a no-op in that direction.
+let suppressUrlUpdate = false;
+
+function setUrl(path) {
+    if (suppressUrlUpdate) return;
+    if (location.pathname !== path) history.pushState({}, "", path);
+}
+
+async function handleRoute(path) {
+    suppressUrlUpdate = true;
+    try {
+        const parts = path.split("/").filter(Boolean);
+        if (parts[0] === "dashboard" && parts[1]) {
+            const ok = await startPractice(decodeURIComponent(parts[1]), "Dashboard");
+            if (!ok) switchPage("dashboard");
+        } else if (parts[0] === "sentences" && parts[1]) {
+            const ok = await startSentencePracticeBySlug(decodeURIComponent(parts[1]));
+            if (!ok) switchPage("sentences");
+        } else if (parts[0] === "dictionary") {
+            switchPage("dictionary");
+        } else if (parts[0] === "sentences") {
+            switchPage("sentences");
+        } else {
+            switchPage("dashboard");
+        }
+    } finally {
+        suppressUrlUpdate = false;
+    }
+}
+
+window.addEventListener("popstate", () => handleRoute(location.pathname));
+
+// Initialize App -> route off the current URL (no authentication).
 document.addEventListener("DOMContentLoaded", () => {
-    switchPage("dashboard");
+    handleRoute(location.pathname);
 });
 
 // Navigation Router
@@ -47,6 +87,12 @@ function switchPage(pageId) {
     // Terminate webcam/reference when leaving the practice arena
     if (pageId !== "practice") {
         stopPracticeArena();
+    }
+
+    // "practice" has no route of its own - the sign/sentence that started it
+    // owns the URL (set separately by startPractice/enterSentenceArena).
+    if (pageId !== "practice") {
+        setUrl(`/${pageId}`);
     }
 }
 
@@ -191,10 +237,12 @@ async function loadSentences() {
 }
 
 // Enter the practice arena in sentence mode. Shared by the curated-list flow
-// (startSentencePractice) and the type-your-own/auto-generate flow
-// (practiceCustomSentence) - both already know the gloss word list, so
-// neither needs anything beyond this DOM/session setup.
-function enterSentenceArena(englishText, glossWords) {
+// (startSentencePractice/startSentencePracticeBySlug) and the type-your-own/
+// auto-generate flow (practiceCustomSentence) - all already know the gloss
+// word list, so none needs anything beyond this DOM/session setup. `slug` is
+// only present for persisted (curated) sentences, so it's what makes the URL
+// deep-linkable; custom typed sentences don't get a URL of their own.
+function enterSentenceArena(englishText, glossWords, slug) {
     activeSign = null;
     document.getElementById("btn-arena-back").onclick = () => switchPage("sentences");
 
@@ -203,6 +251,7 @@ function enterSentenceArena(englishText, glossWords) {
     document.getElementById("practice-sign-desc").textContent = `Sign ${glossWords.length} word${glossWords.length === 1 ? "" : "s"} in order.`;
 
     switchPage("practice");
+    if (slug) setUrl(`/sentences/${encodeURIComponent(slug)}`);
 
     resetDTWSequences();
     resetCoachState();
@@ -212,20 +261,43 @@ function enterSentenceArena(englishText, glossWords) {
 
 // Start a sentence practice session from the curated list. All words' phase
 // models are already precomputed (phases.json, fetched up front by coach.js),
-// so this needs no live per-word priming.
+// so this needs no live per-word priming. Returns true/false so callers
+// (incl. the URL router) know whether to fall back to the sentences list.
 async function startSentencePractice(sentenceId) {
     try {
         const response = await fetch(`/api/sentences/${sentenceId}`);
         if (!response.ok) {
             showAlert("Error loading sentence.", "error");
-            return;
+            return false;
         }
         const sentence = await response.json();
         const glossWords = sentence.items.map((item) => item.sign.sign_name.toLowerCase());
-        enterSentenceArena(sentence.english_text, glossWords);
+        enterSentenceArena(sentence.english_text, glossWords, sentence.slug);
+        return true;
     } catch (err) {
         console.error("Error starting sentence practice:", err);
         showAlert("Could not start sentence practice.", "error");
+        return false;
+    }
+}
+
+// Same as startSentencePractice, but resolved by URL slug instead of id -
+// what deep-linking to /sentences/<slug> uses.
+async function startSentencePracticeBySlug(slug) {
+    try {
+        const response = await fetch(`/api/sentences/by-slug/${encodeURIComponent(slug)}`);
+        if (!response.ok) {
+            showAlert("Error loading sentence.", "error");
+            return false;
+        }
+        const sentence = await response.json();
+        const glossWords = sentence.items.map((item) => item.sign.sign_name.toLowerCase());
+        enterSentenceArena(sentence.english_text, glossWords, sentence.slug);
+        return true;
+    } catch (err) {
+        console.error("Error starting sentence practice:", err);
+        showAlert("Could not start sentence practice.", "error");
+        return false;
     }
 }
 
@@ -283,13 +355,14 @@ async function practiceCustomSentence() {
     }
 }
 
-// Start Practice Session
+// Start Practice Session. Returns true/false so callers (incl. the URL
+// router) know whether to fall back to a list page.
 async function startPractice(signName, lessonTitle) {
     try {
         const response = await fetch(`/api/dictionary/${encodeURIComponent(signName)}`);
         if (!response.ok) {
             showAlert("Error loading sign.", "error");
-            return;
+            return false;
         }
         activeSign = await response.json();
         endSentenceSession();
@@ -306,6 +379,7 @@ async function startPractice(signName, lessonTitle) {
         resetCoachState();
 
         const signKey = activeSign.sign_name.toLowerCase();
+        setUrl(`/dashboard/${encodeURIComponent(signKey)}`);
 
         const video = document.getElementById("practice-ref-video");
         const placeholder = document.getElementById("video-placeholder");
@@ -358,9 +432,11 @@ async function startPractice(signName, lessonTitle) {
             video.src = `${VIDEO_BASE_URL}/${encodeURIComponent(signKey)}.mp4`;
             video.load();
         }
+        return true;
     } catch (err) {
         console.error("Error starting practice:", err);
         showAlert("Could not start practice session.", "error");
+        return false;
     }
 }
 

@@ -1629,15 +1629,34 @@ function fingerSpread(hand) {
 // language, location is defined relative to the face/head — hands at the lips,
 // forehead, cheek, chin — so anchoring here (instead of the shoulders) captures
 // the linguistic "location" parameter and stays scale/position invariant.
+//
+// Also torso-tilt invariant: raw image dx/dy would shift if the signer (or
+// camera) is tilted/leaning even though the hand's position relative to their
+// own head/torso hasn't changed. Projected onto a torso-aligned frame instead
+// - "down" is the nose-to-mid-shoulder direction (always available from a
+// typical chest-up webcam framing; hip landmarks aren't, so they're not used),
+// "right" is perpendicular to it. Which of the two perpendicular directions is
+// picked as "right" doesn't matter for correctness, only consistency - a
+// left/right sign ambiguity here is exactly what matchHold's mirror-aware
+// matching (mirrorFrame) already exists to absorb.
 function wristLocation(pose, wristIdx) {
     const nose = pose[0], wr = pose[wristIdx];
-    // Anchor to the face (nose); scale by shoulder width — larger and more stable
-    // than head width, so vertical hand positions don't saturate at the clamp.
-    let scale = Math.sqrt((pose[11].x - pose[12].x) ** 2 + (pose[11].y - pose[12].y) ** 2);
+    const ls = pose[11], rs = pose[12];
+    const midShoulderX = (ls.x + rs.x) / 2, midShoulderY = (ls.y + rs.y) / 2;
+
+    let scale = Math.sqrt((ls.x - rs.x) ** 2 + (ls.y - rs.y) ** 2);
     if (scale < 0.02) scale = 0.15;
-    const dx = (wr.x - nose.x) / scale;
-    const dy = (wr.y - nose.y) / scale;
-    return [clamp01((dx + 2) / 4), clamp01((dy + 2) / 4)];
+
+    let downX = midShoulderX - nose.x, downY = midShoulderY - nose.y;
+    const downLen = Math.sqrt(downX * downX + downY * downY) || 1;
+    downX /= downLen; downY /= downLen;
+    const rightX = -downY, rightY = downX; // 90 deg rotation of "down"
+
+    const dxImg = wr.x - nose.x, dyImg = wr.y - nose.y;
+    const bodyRight = (dxImg * rightX + dyImg * rightY) / scale;
+    const bodyDown = (dxImg * downX + dyImg * downY) / scale;
+
+    return [clamp01((bodyRight + 2) / 4), clamp01((bodyDown + 2) / 4)];
 }
 
 function vecAngleDeg(v1, v2) {

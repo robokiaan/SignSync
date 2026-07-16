@@ -1023,11 +1023,26 @@ function renderGlossStrip() {
 }
 
 function analyzeSentenceFeedback(results) {
-    // Sentence already complete (every phase of the combined model reached) -
-    // leave the summary showing instead of re-scoring.
-    if (phaseReached.length && phaseReached.every(Boolean)) return;
-
     const user = smoothUserFrame(extractFrameFeatures(results));
+
+    // Sentence already complete (every phase of the combined model reached):
+    // stay frozen on the summary until the learner actually starts the FIRST
+    // sign again (checked directly here, since a normal scoring pass never
+    // runs while frozen). Clearing on every frame right after finishing (this
+    // function's previous behavior) reset far too eagerly - the very next
+    // frame, still showing whatever pose the learner happened to be in right
+    // after completing the LAST sign, would immediately start scoring a new
+    // attempt against phase 0 and stomp the "Sentence complete!" display
+    // almost instantly. Gating the reset on an actual phase-0 match means it
+    // only fires when the learner deliberately goes back to the start.
+    if (phaseReached.length && phaseReached.every(Boolean)) {
+        const firstHold = activePhaseModel.holds[0];
+        const startingOver = firstHold && matchHold(user, firstHold).q >= HOLD_COMPLETE_Q;
+        if (!startingOver) return;
+        prevUserSmoothed = null;
+        resetPhaseProgress();
+        renderGlossStrip();
+    }
 
     if (!activePhaseModel || activePhaseModel.holds.length === 0) {
         document.getElementById("coach-feedback-status").textContent = "Loading word...";
@@ -1096,17 +1111,9 @@ function analyzeSentenceFeedback(results) {
 
     if (result.allPhasesReached) {
         finishSentenceSession(result.displayScore);
-        // Clear the per-attempt state (the frame-smoothing buffer included -
-        // "camera history") right after completion, same pairing
-        // resetDTWSequences() uses, but WITHOUT touching activePhaseModel:
-        // it stays pointed at sentenceCombinedModel, so the learner can
-        // immediately redo the sentence and watch the score climb from 0%
-        // again instead of it staying frozen at the completed value forever
-        // (the guard at the top of this function otherwise stops scoring
-        // any further frame once every phase is reached).
-        prevUserSmoothed = null;
-        resetPhaseProgress();
-        renderGlossStrip();
+        // No reset here - see the top of this function. The per-attempt state
+        // clears when the learner actually starts the first sign again, not
+        // the instant the last one completes.
     }
 }
 

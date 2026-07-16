@@ -101,6 +101,24 @@ async def prime_and_build(page, sign_name: str, timestamps: list):
     return await page.evaluate(BUILD_JS, timestamps)
 
 
+def _is_degenerate(model):
+    """True if MediaPipe silently detected nothing for a hold (GPU/headless
+    resource contention under concurrency causes this SILENTLY - the page's
+    own polling still sees phaseCache[key] go truthy, so prime_and_build
+    reports success, but every feature is the untracked-landmark default
+    (0.5) and every visibility flag is false). A hold like that can never be
+    matched by any real performance, so it must be rejected as a failure
+    rather than accepted as a build with real content."""
+    for hold in model.get("holds", []):
+        vis = hold.get("visibility", {})
+        if not vis.get("rightHand") and not vis.get("leftHand") and not vis.get("pose"):
+            return True
+        feats = hold.get("features", [])
+        if feats and all(abs(v - 0.5) < 1e-9 for v in feats):
+            return True
+    return False
+
+
 async def worker(browser, worker_id, items, results, errors):
     context = await browser.new_context()
     page = await context.new_page()
@@ -114,13 +132,16 @@ async def worker(browser, worker_id, items, results, errors):
         except Exception as e:
             model = None
             print(f"[w{worker_id}] {sign_name}: EXCEPTION {e}")
+        if model and _is_degenerate(model):
+            print(f"[w{worker_id}] {i + 1}/{len(items)} {sign_name}: DEGENERATE (no landmarks detected) - treating as failure")
+            model = None
         if model:
             results[sign_name.lower()] = model
             holds = len(model.get("holds", []))
             print(f"[w{worker_id}] {i + 1}/{len(items)} {sign_name}: {holds} hold(s) in {time.time() - t0:.1f}s")
         else:
             errors.append(sign_name)
-            print(f"[w{worker_id}] {i + 1}/{len(items)} {sign_name}: FAILED (timed out)")
+            print(f"[w{worker_id}] {i + 1}/{len(items)} {sign_name}: FAILED")
 
     await context.close()
 

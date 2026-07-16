@@ -107,7 +107,13 @@ let activePrimeId = 0;         // guards against overlapping reference primings
 // in-browser priming entirely instead of running the reference video through
 // Holistic frame-by-frame. Missing/failed fetch just means every sign falls
 // back to live priming, same as before this file existed.
-const precomputedPhasesPromise = fetch("/phases.json")
+// no-cache: without it, a browser that ever cached this response keeps
+// serving it forever regardless of what's actually on disk now - the same
+// bug class as index.html/app.js/data-*.json earlier this session, just
+// missed for this file. Also matters for build_phases_from_labels.py, which
+// relies on this fetch seeing the CURRENT file (it writes phases.json empty
+// before priming so live priming actually runs) rather than a stale cache.
+const precomputedPhasesPromise = fetch("/phases.json", { cache: "no-cache" })
     .then((r) => (r.ok ? r.json() : {}))
     .catch(() => ({}));
 

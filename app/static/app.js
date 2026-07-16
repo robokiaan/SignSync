@@ -320,8 +320,20 @@ function enterSentenceArena(englishText, glossWords, slug) {
     switchPage("practice");
     if (slug) setUrl(`/sentences/${encodeURIComponent(slug)}`);
 
+    // Reset button is single-sign-practice only - sentence mode redoes
+    // automatically when you go back to the first word (resumeCombinedModel).
+    document.getElementById("btn-reset-attempt").style.display = "none";
+
+    // Reference video defaults to shown. Set explicitly rather than relying
+    // on whatever opacity single-sign practice's own toggle last left behind -
+    // coach.js's video-chain loading (playCombinedVideo/loadChainedWord)
+    // never touches opacity itself, only display:block/none.
+    const showSignToggle = document.getElementById("toggle-disable-video");
+    handleVideoToggle(showSignToggle ? showSignToggle.checked : true);
+
     resetDTWSequences();
     resetCoachState();
+    startWebcamStream();
 
     beginSentenceSession(englishText, glossWords);
 }
@@ -434,9 +446,12 @@ async function startPractice(signName, lessonTitle) {
 
         switchPage("practice");
 
+        document.getElementById("btn-reset-attempt").style.display = "";
+
         // Reset coach + DTW buffers before priming the new reference.
         resetDTWSequences();
         resetCoachState();
+        startWebcamStream();
 
         const signKey = activeSign.sign_name.toLowerCase();
         setUrl(`/dashboard/${encodeURIComponent(signKey)}`);
@@ -512,9 +527,14 @@ function stopPracticeArena() {
     resetDTWSequences();
     endSentenceSession();
 
+    // Reference video defaults to shown - leave the checkbox checked so
+    // re-entering practice (a different sign, or coming back later) keeps
+    // showing it by default, not just on the very first page load.
     const toggle = document.getElementById("toggle-disable-video");
-    if (toggle) toggle.checked = false;
+    if (toggle) toggle.checked = true;
     handleVideoToggle(false);
+
+    document.getElementById("btn-reset-attempt").style.display = "none";
 
     const placeholder = document.getElementById("video-placeholder");
     if (placeholder) {

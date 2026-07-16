@@ -251,6 +251,18 @@ function resetPhaseProgress() {
     lastDisplayScore = 0;
 }
 
+// Manual reset for single-sign practice ("Reset" button): clears the
+// per-attempt phase state and the frame-smoothing buffer ("camera history",
+// same pairing resetDTWSequences/the sentence-redo reset use), and forces the
+// displayed score to 0% immediately rather than waiting for the next frame.
+function resetSignAttempt() {
+    prevUserSmoothed = null;
+    resetPhaseProgress();
+    document.getElementById("coach-score-display").textContent = "0%";
+    document.getElementById("coach-feedback-status").textContent = "Reset";
+    document.getElementById("coach-feedback-message").textContent = "Score cleared — try the sign again.";
+}
+
 function waitForVideoReady(video) {
     return new Promise((resolve) => {
         if (video.readyState >= 2) { resolve(); return; }
@@ -303,15 +315,24 @@ function seekVideo(video, time) {
 // Webcam control
 // ---------------------------------------------------------------------------
 async function toggleWebcam() {
-    const btn = document.getElementById("btn-toggle-camera");
-
     if (isWebcamActive) {
+        const btn = document.getElementById("btn-toggle-camera");
         stopWebcamStream();
         btn.textContent = "Start Camera";
         btn.style.background = "";
         resetCoachState();
         return;
     }
+    await startWebcamStream();
+}
+
+// Split out of toggleWebcam so app.js can auto-start the camera when
+// entering the practice arena, not just on the button click. Idempotent -
+// safe to call whenever a session begins regardless of whether the camera
+// is already running from a previous sign/sentence in the same visit.
+async function startWebcamStream() {
+    if (isWebcamActive) return;
+    const btn = document.getElementById("btn-toggle-camera");
 
     document.getElementById("coach-feedback-status").textContent = "Starting camera...";
     btn.textContent = "Stop Camera";

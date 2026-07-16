@@ -45,6 +45,14 @@ const REST_FLOOR = 0.95;
 const MOVE_WEIGHT = 0.20;          // how much movement-direction agreement modulates a phase's credit
 // Feature indices that carry hand position/orientation (used for move direction).
 const POSITION_DIMS = [5, 6, 7, 14, 15, 16, 22, 23, 24, 25];
+// Minimum time the learner must dwell in a phase before the state machine will
+// advance them to the next one - gives a beat to physically switch poses
+// (whether that's the next hold within one sign, or the next word in a
+// sentence - curPhase advancement is the same mechanism for both since the
+// sentence combined model, so this one gate covers both uniformly). Without
+// it, a noisy frame during a fast transition could satisfy the advance
+// condition and skip a phase the learner never actually held.
+const PHASE_TRANSITION_DELAY_MS = 300;
 
 // Per-attempt scoring state (reset in resetDTWSequences)
 let activePhaseModel = null;   // { holds, moveDirs, holdTimes, requires }
@@ -52,6 +60,7 @@ let phaseBest = [];            // best hold quality achieved per phase this atte
 let phaseReached = [];         // has each phase been hit at least at HOLD_COMPLETE_Q?
 let phaseUserPose = [];        // user feature vector captured when each phase was reached
 let curPhase = 0;              // phase the learner is currently working toward
+let phaseEnteredAt = 0;        // performance.now() when curPhase last changed - see PHASE_TRANSITION_DELAY_MS
 let leftFinalPose = false;     // has the learner moved off the final pose (guards attempt restart)?
 let missingLimbFrames = 0;     // consecutive frames missing a required limb (debounces the prompt)
 let lastDisplayScore = 0;      // last score shown (kept while prompting for limbs)
@@ -230,6 +239,7 @@ function resetPhaseProgress() {
     phaseReached = new Array(P).fill(false);
     phaseUserPose = new Array(P).fill(null);
     curPhase = 0;
+    phaseEnteredAt = performance.now();
     leftFinalPose = false;
     missingLimbFrames = 0;
     lastDisplayScore = 0;
@@ -622,10 +632,20 @@ function scoreActiveModel(user) {
         phaseUserPose[curPhase] = matches[curPhase].um.features.slice();
     }
 
-    // Advance when this phase is reached and the next hold now matches at least
-    // as well (the learner has moved on to the next pose).
-    if (curPhase < P - 1 && phaseReached[curPhase] && q[curPhase + 1] >= q[curPhase] && q[curPhase + 1] > 0.2) {
+    // Advance when this phase is reached, the next hold now matches at least as
+    // well (the learner has moved on to the next pose), and they've dwelt in
+    // this phase for at least PHASE_TRANSITION_DELAY_MS - a beat to physically
+    // switch poses, and a guard against a noisy frame mid-transition skipping
+    // a phase the learner never actually held.
+    if (
+        curPhase < P - 1 &&
+        phaseReached[curPhase] &&
+        q[curPhase + 1] >= q[curPhase] &&
+        q[curPhase + 1] > 0.2 &&
+        performance.now() - phaseEnteredAt >= PHASE_TRANSITION_DELAY_MS
+    ) {
         curPhase++;
+        phaseEnteredAt = performance.now();
         phaseBest[curPhase] = Math.max(phaseBest[curPhase], q[curPhase]);
         if (q[curPhase] >= HOLD_COMPLETE_Q) {
             phaseReached[curPhase] = true;
@@ -859,7 +879,7 @@ function setSentenceViewMode(mode) {
         resumeCombinedModel();
     } else {
         if (!savedFocusStash) {
-            savedFocusStash = { phaseBest, phaseReached, phaseUserPose, curPhase };
+            savedFocusStash = { phaseBest, phaseReached, phaseUserPose, curPhase, phaseEnteredAt };
         }
         focusOnWord(mode); // repoint activePhaseModel at the selected word
     }
@@ -886,7 +906,7 @@ function applyViewMode() {
 function resumeCombinedModel() {
     activePhaseModel = sentenceCombinedModel;
     if (savedFocusStash) {
-        ({ phaseBest, phaseReached, phaseUserPose, curPhase } = savedFocusStash);
+        ({ phaseBest, phaseReached, phaseUserPose, curPhase, phaseEnteredAt } = savedFocusStash);
         savedFocusStash = null;
     }
 }

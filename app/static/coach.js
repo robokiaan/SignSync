@@ -1090,6 +1090,17 @@ function analyzeSentenceFeedback(results) {
 
     if (result.allPhasesReached) {
         finishSentenceSession(result.displayScore);
+        // Clear the per-attempt state (the frame-smoothing buffer included -
+        // "camera history") right after completion, same pairing
+        // resetDTWSequences() uses, but WITHOUT touching activePhaseModel:
+        // it stays pointed at sentenceCombinedModel, so the learner can
+        // immediately redo the sentence and watch the score climb from 0%
+        // again instead of it staying frozen at the completed value forever
+        // (the guard at the top of this function otherwise stops scoring
+        // any further frame once every phase is reached).
+        prevUserSmoothed = null;
+        resetPhaseProgress();
+        renderGlossStrip();
     }
 }
 

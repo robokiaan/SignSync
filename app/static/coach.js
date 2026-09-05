@@ -54,6 +54,33 @@ const POSITION_DIMS = [5, 6, 7, 14, 15, 16, 22, 23, 24, 25];
 // condition and skip a phase the learner never actually held.
 const PHASE_TRANSITION_DELAY_MS = 300;
 
+// A checkpoint counts if it clears HOLD_COMPLETE_Q and lands within this margin
+// of the best-scoring checkpoint - it does not have to win outright. Two
+// checkpoints in the same sign can be genuinely identical, and an exact tie used
+// to resolve to whichever came first, leaving the later one permanently
+// unreachable. Swept against the labelled data: correct-acceptance plateaus at
+// 0.05, while larger margins only add false advances.
+const MATCH_TOLERANCE = 0.05;
+
+// Wrist height (pose-derived, so it survives hand-tracking loss) below which a
+// hand counts as raised and therefore in use. Matches requiredLimbs' own test.
+const HAND_ACTIVE_Y = 0.85;
+
+// How long the learner must have no hands on camera before a finished attempt
+// closes and the next one can start. Hand tracking flickers for a frame or two
+// during fast motion, so this has to be long enough that a dropout mid-sign is
+// never mistaken for a deliberate "I'm done".
+const HANDS_AWAY_RESET_MS = 500;
+
+// Time penalty: each transition between checkpoints gets 3x the reference clip's
+// own duration, and every completed budget multiplies the WHOLE attempt score by
+// TIME_PENALTY_STEP, compounding, down to TIME_PENALTY_FLOOR. Budgets work out at
+// 4.9s (shortest clip) to 15.6s (longest), so copying the reference at its own
+// tempo never crosses a boundary at all.
+const TIME_BUDGET_CLIP_MULTIPLE = 3;
+const TIME_PENALTY_STEP = 0.9;
+const TIME_PENALTY_FLOOR = 0.5;
+
 // Per-attempt scoring state (reset in resetDTWSequences)
 let activePhaseModel = null;   // { holds, moveDirs, holdTimes, requires }
 let phaseBest = [];            // best hold quality achieved per phase this attempt
@@ -61,7 +88,10 @@ let phaseReached = [];         // has each phase been hit at least at HOLD_COMPL
 let phaseUserPose = [];        // user feature vector captured when each phase was reached
 let curPhase = 0;              // phase the learner is currently working toward
 let phaseEnteredAt = 0;        // performance.now() when curPhase last changed - see PHASE_TRANSITION_DELAY_MS
-let leftFinalPose = false;     // has the learner moved off the final pose (guards attempt restart)?
+let attemptComplete = false;   // final checkpoint banked; waiting for hands to leave before re-arming
+let handsAwaySince = 0;        // when the learner's hands first went off camera (0 = they're visible)
+let attemptArmed = true;       // ready to begin a new attempt on the next first-checkpoint hit
+let timeCrossings = 0;         // banked time-budget overruns this attempt
 let missingLimbFrames = 0;     // consecutive frames missing a required limb (debounces the prompt)
 let lastDisplayScore = 0;      // last score shown (kept while prompting for limbs)
 let prevUserSmoothed = null;   // last smoothed user frame, for feature EMA
@@ -117,7 +147,10 @@ const precomputedPhasesPromise = fetch("/phases.json", { cache: "no-cache" })
     .then((r) => (r.ok ? r.json() : {}))
     .catch(() => ({}));
 
-const SAMPLE_FPS = 5;           // reference sampling rate (holds are matched per-frame, so the live rate can be higher)
+const SAMPLE_FPS = 25;          // reference sampling rate; matches the 25fps source so a hand-labelled
+                                // timestamp lands on a real frame instead of being rounded onto a 0.2s
+                                // grid and then averaged across a 0.4s window (which blurred neighbouring
+                                // checkpoints into each other - some came out identical and unreachable)
 const USER_THROTTLE_MS = 100;   // live webcam MediaPipe interval; lower = snappier score (send() is serialized, so no backup)
 
 const MEDIAPIPE_OPTIONS = {
@@ -236,6 +269,23 @@ async function primeReference(signName) {
 function activatePhaseModel(signName) {
     activePhaseModel = phaseCache[signName] || (refCache[signName] ? buildPhaseModel(refCache[signName]) : null);
     if (activePhaseModel && !phaseCache[signName]) phaseCache[signName] = activePhaseModel;
+    // The time-penalty budget is a multiple of the reference clip's own length,
+    // so a 5s sign isn't held to a 1.6s sign's pace. Read it off the loaded
+    // reference video; if it isn't known the penalty simply never fires.
+    if (activePhaseModel) {
+        // requiredLimbs only counts a hand as "used" if it was tracked in at
+        // least half the reference frames, so a clip where tracking struggled
+        // can come back asking for ZERO hands - and then the "show your hands"
+        // prompt never fires and the score can be earned with nothing on
+        // camera. No sign is performed with no hands, so floor it at one.
+        // Applied on load rather than at build time so it needs no rebuild.
+        if (activePhaseModel.requires && !activePhaseModel.requires.hands) {
+            activePhaseModel.requires = { ...activePhaseModel.requires, hands: 1 };
+        }
+        const refVideo = document.getElementById("practice-ref-video");
+        const d = refVideo && refVideo.duration;
+        activePhaseModel.clipDuration = (isFinite(d) && d > 0) ? d : (activePhaseModel.clipDuration || 0);
+    }
     resetPhaseProgress();
 }
 
@@ -246,7 +296,10 @@ function resetPhaseProgress() {
     phaseUserPose = new Array(P).fill(null);
     curPhase = 0;
     phaseEnteredAt = performance.now();
-    leftFinalPose = false;
+    attemptComplete = false;
+    handsAwaySince = 0;
+    attemptArmed = true;
+    timeCrossings = 0;
     missingLimbFrames = 0;
     lastDisplayScore = 0;
 }
@@ -282,7 +335,7 @@ async function sampleVideoThroughModel(video, myId) {
     let duration = video.duration;
     if (!isFinite(duration) || duration <= 0) duration = 10; // safety fallback
 
-    const step = 1 / SAMPLE_FPS; // 0.2s to match the live 5 FPS user rate
+    const step = 1 / SAMPLE_FPS; // one source frame; the live webcam rate is independent of this
     for (let t = 0; t < duration - 1e-3; t += step) {
         if (myId !== activePrimeId) return;
         await seekVideo(video, t);
@@ -500,8 +553,11 @@ const FEATURE_GROUPS = [
     { start: 0, end: 9, needRight: true },
     { start: 9, end: 18, needLeft: true },
     { start: 18, end: 22, needPose: true },
-    { start: 22, end: 24, needRight: true, needPose: true },
-    { start: 24, end: 26, needLeft: true, needPose: true },
+    // Wrist LOCATION comes from the pose landmarks (15/16), not the hand model,
+    // so it stays usable when hand tracking drops - gating it on hand visibility
+    // threw away position data we still had.
+    { start: 22, end: 24, needPose: true },
+    { start: 24, end: 26, needPose: true },
 ];
 const FEATURE_DIM = 26;
 
@@ -522,6 +578,8 @@ const FEATURE_WEIGHTS = [
     0.6, 0.6,        // 22-23 right wrist location x,y (face-relative)
     0.6, 0.6,        // 24-25 left wrist location x,y (face-relative)
 ];
+
+const FEATURE_WEIGHT_TOTAL = FEATURE_WEIGHTS.reduce((a, b) => a + b, 0);
 
 // Per-feature coaching message, indexed to match the layout above.
 const FEATURE_FEEDBACK = (() => {
@@ -592,22 +650,54 @@ function getMaskedVectorDistance(userFrame, refFrame) {
     const uf = userFrame.features;
     const rf = refFrame.features;
 
+    // Ungradeable features count as MAXIMUM error and the divisor is always the
+    // full weight, so every hold is judged on the same terms. Skipping them (and
+    // dividing by only what was left) scored a hold on fewer features as an
+    // average over fewer chances to be wrong, so sparse holds looked better than
+    // properly-formed ones and won matches they should have lost.
     let sum = 0;
-    let weightSum = 0;
     for (const g of FEATURE_GROUPS) {
-        if (g.needRight && !(uVis.rightHand && rVis.rightHand)) continue;
-        if (g.needLeft && !(uVis.leftHand && rVis.leftHand)) continue;
-        if (g.needPose && !(uVis.pose && rVis.pose)) continue;
+        let gradeable = true;
+        if (g.needRight && !(uVis.rightHand && rVis.rightHand)) gradeable = false;
+        if (g.needLeft && !(uVis.leftHand && rVis.leftHand)) gradeable = false;
+        if (g.needPose && !(uVis.pose && rVis.pose)) gradeable = false;
+
+        // Two exemptions, both about NOT punishing the learner for something
+        // that isn't their doing:
+        //   - the reference itself never had this hand tracked, so there is
+        //     nothing to compare against (our data gap, not their mistake);
+        //   - the hand is resting at the signer's side in this pose, so it
+        //     carries no meaning whether it was tracked or not.
+        // A hand the learner is simply not showing is NOT exempt - that stays a
+        // real miss, and requiredLimbsMissing prompts them separately.
+        if (!gradeable && (g.needRight || g.needLeft)) {
+            const side = g.needRight ? "right" : "left";
+            if (!refHandUsable(refFrame, side)) continue;
+        }
+
         for (let i = g.start; i < g.end; i++) {
-            const d = uf[i] - rf[i];
             const w = FEATURE_WEIGHTS[i];
-            sum += w * d * d;
-            weightSum += w;
+            if (gradeable) {
+                const d = uf[i] - rf[i];
+                sum += w * d * d;
+            } else {
+                sum += w; // maximum per-feature error
+            }
         }
     }
 
-    if (weightSum === 0) return 1.0;
-    return Math.sqrt(sum / weightSum);
+    return Math.sqrt(sum / FEATURE_WEIGHT_TOTAL);
+}
+
+// Is this reference hold's `side` hand something we can fairly demand? No if the
+// reference never tracked it, and no if it was hanging at rest. Wrist height is
+// pose-derived, so it is still known even when the hand model lost the hand.
+function refHandUsable(refFrame, side) {
+    const tracked = side === "right" ? refFrame.visibility.rightHand : refFrame.visibility.leftHand;
+    if (tracked) return true;
+    if (!refFrame.visibility.pose) return false;
+    const wristY = side === "right" ? refFrame.features[23] : refFrame.features[25];
+    return wristY < HAND_ACTIVE_Y; // raised => genuinely in use, so its absence is a real gap
 }
 
 // Light per-feature EMA on the live user stream to damp landmark jitter.
@@ -652,20 +742,26 @@ function scoreActiveModel(user) {
     const matches = holds.map((h) => matchHold(user, h));
     const q = matches.map((m) => m.q);
 
-    // Which hold does the CURRENT pose match best, out of every hold in the
-    // sign - not just curPhase and curPhase+1. Two adjacent holds that are
-    // visually similar (e.g. "palm below head" vs "palm above head") can both
-    // score above HOLD_COMPLETE_Q off one noisy/blurry/fast-moving frame, so
-    // comparing curPhase only to its neighbor let that one frame satisfy
-    // several phases at once. Requiring curPhase to be the clear best match
-    // among ALL P holds - not merely "above threshold" - is what actually
-    // distinguishes "this is genuinely hold N" from "this is ambiguous."
     let bestIdx = 0;
     for (let i = 1; i < P; i++) if (q[i] > q[bestIdx]) bestIdx = i;
 
-    // Progress on the phase currently being worked toward.
+    // Phases run strictly in order: we are only ever looking for curPhase, so a
+    // pose resembling an EARLIER hold mid-sign is ignored rather than treated as
+    // progress. What still has to be ruled out is banking curPhase while the
+    // learner is really still standing in the previous pose, which happens when
+    // two consecutive holds look alike - hence comparing against the best hold
+    // rather than accepting any pose over the threshold.
+    //
+    // The comparison allows MATCH_TOLERANCE of slack instead of demanding an
+    // outright win: two holds in one sign can be genuinely identical, and an
+    // exact tie resolved to whichever came first, leaving the later one
+    // permanently unreachable.
     phaseBest[curPhase] = Math.max(phaseBest[curPhase], q[curPhase]);
-    if (q[curPhase] >= HOLD_COMPLETE_Q && bestIdx === curPhase) {
+    if (q[curPhase] >= HOLD_COMPLETE_Q && q[curPhase] >= q[bestIdx] - MATCH_TOLERANCE) {
+        if (!phaseReached[curPhase]) {
+            // Close off the transition that led here, for the time penalty.
+            recordTransitionTiming(curPhase);
+        }
         phaseReached[curPhase] = true;
         phaseUserPose[curPhase] = matches[curPhase].um.features.slice();
     }
@@ -674,7 +770,7 @@ function scoreActiveModel(user) {
     // PHASE_TRANSITION_DELAY_MS - a beat to physically switch poses. Advancing
     // just moves which phase is being watched/diagnosed next; it does NOT
     // mark that next phase reached; the check above has to independently see
-    // it win the argmax on a later, fresh frame before it counts as done.
+    // it on a later, fresh frame before it counts as done.
     if (
         curPhase < P - 1 &&
         phaseReached[curPhase] &&
@@ -696,14 +792,61 @@ function scoreActiveModel(user) {
         else contrib = 0;
         sum += contrib * moveCredit(p);
     }
-    const displayScore = Math.min(100, Math.round(clamp01(sum / P) * 99 * 1.1));
+    // Taking too long multiplies the whole attempt, compounding per overrun
+    // budget. Evaluated live so the number reflects the delay as it happens
+    // rather than arriving as a surprise at the end.
+    const timePenalty = currentTimePenalty();
+    const displayScore = Math.min(100, Math.round(clamp01(sum / P) * timePenalty * 99));
 
     // Diagnose against the current phase's target (post-advance), in whichever
     // orientation matched.
     const target = holds[curPhase];
     const { idx: worstIdx, diff: worstDiff } = jointDiagnostic(matches[curPhase].um, target);
 
-    return { P, q, matches, displayScore, allPhasesReached: phaseReached.every(Boolean), worstIdx, worstDiff, bestIdx };
+    return { P, q, matches, displayScore, allPhasesReached: phaseReached.every(Boolean), worstIdx, worstDiff, bestIdx, timePenalty };
+}
+
+// --- Time penalty -----------------------------------------------------------
+// Each transition between consecutive checkpoints gets a budget of
+// TIME_BUDGET_CLIP_MULTIPLE x the reference clip's own length. Every completed
+// budget is one "crossing", crossings accumulate across the attempt, and the
+// whole score is multiplied by TIME_PENALTY_STEP per crossing down to
+// TIME_PENALTY_FLOOR. Time before the first checkpoint is free, so
+// single-checkpoint signs carry no penalty at all.
+function transitionBudgetMs() {
+    if (!activePhaseModel) return Infinity;
+    // Duration often isn't known yet when the model is activated (metadata still
+    // loading), so resolve it lazily and cache. Sentence practice has no single
+    // clip, so it never resolves one and the penalty simply never fires there.
+    if (!activePhaseModel.clipDuration) {
+        const refVideo = document.getElementById("practice-ref-video");
+        const d = refVideo && refVideo.duration;
+        if (isFinite(d) && d > 0) activePhaseModel.clipDuration = d;
+    }
+    const clip = activePhaseModel.clipDuration || 0;
+    if (!clip) return Infinity; // unknown clip length => never penalise
+    return TIME_BUDGET_CLIP_MULTIPLE * clip * 1000;
+}
+
+function crossingsFor(elapsedMs) {
+    const budget = transitionBudgetMs();
+    if (!isFinite(budget) || budget <= 0 || !isFinite(elapsedMs) || elapsedMs <= 0) return 0;
+    return Math.floor(elapsedMs / budget);
+}
+
+// Banked crossings, plus the transition currently in progress so the score ticks
+// down while the learner is still stalling rather than only afterwards.
+function currentTimePenalty() {
+    let crossings = timeCrossings;
+    if (curPhase > 0 && !phaseReached[curPhase] && phaseEnteredAt) {
+        crossings += crossingsFor(performance.now() - phaseEnteredAt);
+    }
+    return Math.max(TIME_PENALTY_FLOOR, Math.pow(TIME_PENALTY_STEP, crossings));
+}
+
+function recordTransitionTiming(phaseIdx) {
+    if (phaseIdx === 0 || !phaseEnteredAt) return; // nothing precedes the first checkpoint
+    timeCrossings += crossingsFor(performance.now() - phaseEnteredAt);
 }
 
 function analyzeFeedback(results) {
@@ -717,7 +860,7 @@ function analyzeFeedback(results) {
     // Prompt (debounced) if the sign needs limbs the learner isn't showing, and
     // freeze the score meanwhile so it can't be gamed by hiding a required hand.
     const need = activePhaseModel.requires;
-    const limbMsg = requiredLimbsMissing(user, need);
+    const limbMsg = attemptComplete ? null : requiredLimbsMissing(user, need);
     if (limbMsg) {
         missingLimbFrames++;
         if (missingLimbFrames >= 3) {
@@ -736,28 +879,48 @@ function analyzeFeedback(results) {
     const { P, q, matches, displayScore, allPhasesReached: done, worstIdx, worstDiff, bestIdx } = scoreActiveModel(user);
     lastDisplayScore = displayScore;
 
-    // Attempt restart: only after the learner FINISHED, then moved off the final
-    // pose, then returned to the start pose (avoids false restarts on signs whose
-    // start and end look alike). Single-sign practice only - a sentence session
-    // advances to the next WORD instead of restarting the same one. Same argmax
-    // requirement as scoreActiveModel's own completion check - q[0] alone can
-    // clear HOLD_COMPLETE_Q on a pose that actually resembles a LATER hold more
-    // (e.g. hold 4/5 looking similar to hold 0), falsely triggering a restart.
-    if (P > 1 && phaseReached[P - 1]) {
-        if (q[P - 1] < 0.35) leftFinalPose = true;
-        if (leftFinalPose && q[0] >= HOLD_COMPLETE_Q && bestIdx === 0) {
-            resetPhaseProgress();
-            phaseBest[0] = q[0];
-            phaseReached[0] = true;
-            phaseUserPose[0] = matches[0].um.features.slice();
-        }
+    // Attempt lifecycle. An attempt ends when the final checkpoint is banked;
+    // the score then LOCKS on screen and the next attempt cannot begin until the
+    // learner takes their hands off camera. Hands-away is a yes/no from the
+    // tracker rather than a pose comparison, so unlike the old "did they return
+    // to the start pose" test it cannot be fooled by the 81% of signs whose
+    // final pose resembles their first. HANDS_AWAY_RESET_MS guards the other
+    // direction: hand tracking drops for a frame or two during fast motion, and
+    // a blink like that must never wipe an attempt in progress.
+    const handsVisible = user.visibility.rightHand || user.visibility.leftHand;
+    if (handsVisible) {
+        handsAwaySince = 0;
+    } else if (!handsAwaySince) {
+        handsAwaySince = performance.now();
+    }
+    const handsGoneLongEnough = handsAwaySince && performance.now() - handsAwaySince >= HANDS_AWAY_RESET_MS;
+
+    if (done && !attemptComplete) {
+        attemptComplete = true;
+        attemptArmed = false;
+    }
+    if (attemptComplete && handsGoneLongEnough) {
+        attemptComplete = false;
+        attemptArmed = true;      // next first-checkpoint hit starts a fresh attempt
+        resetPhaseProgress();
+        prevUserSmoothed = null;  // don't blend across the gap
+        document.getElementById("coach-score-display").textContent = "0%";
+        document.getElementById("coach-feedback-status").textContent = "Ready";
+        document.getElementById("coach-feedback-message").textContent = "Start the sign whenever you're ready.";
+        return;
     }
 
     // Feedback focuses on the current phase (diagnose against the matched orientation).
     let feedback;
-    if (done && displayScore >= 75) {
-        feedback = `All ${P} phase${P > 1 ? "s" : ""} matched — excellent!`;
-        speakFeedback("Excellent! You matched the whole sign.");
+    if (done) {
+        // Score is locked now; hands off camera is what starts the next attempt.
+        const praise = displayScore >= 75
+            ? `All ${P} pose${P > 1 ? "s" : ""} matched — excellent! `
+            : (displayScore < 60 ? "Try again more slowly, holding each position briefly. " : "");
+        feedback = `${praise}Lower your hands to go again.`;
+        speakFeedback(displayScore >= 75
+            ? "Excellent! Lower your hands to go again."
+            : "Lower your hands to go again.");
     } else if (q[curPhase] >= HOLD_COMPLETE_Q) {
         feedback = P > 1 ? `Phase ${curPhase + 1}/${P} matched — move to the next pose.` : "Pose matched — hold it!";
         speakFeedback(P > 1 ? "Good. Now the next pose." : "Pose matched.");

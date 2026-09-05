@@ -10,7 +10,7 @@ from app.models import SignDictionary, Lesson, LessonItem, Sentence, SentenceGlo
 CATEGORIES_MAP = {
     "colours": ["blue", "black", "brown", "green", "grey", "orange", "pink", "red", "white", "yellow", "colour"],
     "seasons": ["summer", "spring", "winter", "fall", "season", "ex. monsoon", "monsoon"],
-    "days and time": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "today", "tomorrow", "yesterday", "week", "month", "year", "time", "morning", "afternoon", "evening", "night", "second", "hour", "minute"],
+    "days and time": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "today", "tomorrow", "yesterday", "week", "month", "year", "time", "morning", "afternoon", "evening", "night", "second (time)", "hour", "minute"],
     "animals": ["animal", "cat", "dog", "cow", "horse", "bird", "fish", "mouse"],
     "clothes": ["clothing", "dress", "hat", "pant", "pocket", "shirt", "shoes", "skirt", "suit", "t-shirt"],
     "pronouns": ["i", "you", "he", "she", "it", "we", "they", "you (plural)"],

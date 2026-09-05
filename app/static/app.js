@@ -446,14 +446,23 @@ async function startPractice(signName, lessonTitle) {
 
         switchPage("practice");
 
-        document.getElementById("btn-reset-attempt").style.display = "";
+        const signKey = activeSign.sign_name.toLowerCase();
+
+        // Manual reset is only useful for single-hold signs: a multi-hold sign
+        // already auto-detects returning to hold 1 and restarts itself (see
+        // coach.js's "Attempt restart" logic), so the button would be a
+        // redundant, easy-to-mispress no-op there. precomputedPhasesPromise
+        // (from coach.js) resolves near-instantly since phases.json is fetched
+        // once at page load, well before any sign gets clicked.
+        const precomputedPhases = await precomputedPhasesPromise;
+        const holdCount = precomputedPhases[signKey]?.holds?.length ?? 0;
+        document.getElementById("btn-reset-attempt").style.display = holdCount > 1 ? "none" : "";
 
         // Reset coach + DTW buffers before priming the new reference.
         resetDTWSequences();
         resetCoachState();
         startWebcamStream();
 
-        const signKey = activeSign.sign_name.toLowerCase();
         setUrl(`/dashboard/${encodeURIComponent(signKey)}`);
 
         const video = document.getElementById("practice-ref-video");

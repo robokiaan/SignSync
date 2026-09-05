@@ -376,7 +376,7 @@ async function startWebcamStream() {
         btn.textContent = "Start Camera";
         btn.style.background = "";
         isWebcamActive = false;
-        holisticMode = "idle";
+        if (holisticMode === "user") holisticMode = "idle";
     }
 }
 
@@ -652,32 +652,37 @@ function scoreActiveModel(user) {
     const matches = holds.map((h) => matchHold(user, h));
     const q = matches.map((m) => m.q);
 
+    // Which hold does the CURRENT pose match best, out of every hold in the
+    // sign - not just curPhase and curPhase+1. Two adjacent holds that are
+    // visually similar (e.g. "palm below head" vs "palm above head") can both
+    // score above HOLD_COMPLETE_Q off one noisy/blurry/fast-moving frame, so
+    // comparing curPhase only to its neighbor let that one frame satisfy
+    // several phases at once. Requiring curPhase to be the clear best match
+    // among ALL P holds - not merely "above threshold" - is what actually
+    // distinguishes "this is genuinely hold N" from "this is ambiguous."
+    let bestIdx = 0;
+    for (let i = 1; i < P; i++) if (q[i] > q[bestIdx]) bestIdx = i;
+
     // Progress on the phase currently being worked toward.
     phaseBest[curPhase] = Math.max(phaseBest[curPhase], q[curPhase]);
-    if (q[curPhase] >= HOLD_COMPLETE_Q) {
+    if (q[curPhase] >= HOLD_COMPLETE_Q && bestIdx === curPhase) {
         phaseReached[curPhase] = true;
         phaseUserPose[curPhase] = matches[curPhase].um.features.slice();
     }
 
-    // Advance when this phase is reached, the next hold now matches at least as
-    // well (the learner has moved on to the next pose), and they've dwelt in
-    // this phase for at least PHASE_TRANSITION_DELAY_MS - a beat to physically
-    // switch poses, and a guard against a noisy frame mid-transition skipping
-    // a phase the learner never actually held.
+    // Advance once this phase is reached and they've dwelt here for at least
+    // PHASE_TRANSITION_DELAY_MS - a beat to physically switch poses. Advancing
+    // just moves which phase is being watched/diagnosed next; it does NOT
+    // mark that next phase reached; the check above has to independently see
+    // it win the argmax on a later, fresh frame before it counts as done.
     if (
         curPhase < P - 1 &&
         phaseReached[curPhase] &&
-        q[curPhase + 1] >= q[curPhase] &&
-        q[curPhase + 1] > 0.2 &&
         performance.now() - phaseEnteredAt >= PHASE_TRANSITION_DELAY_MS
     ) {
         curPhase++;
         phaseEnteredAt = performance.now();
         phaseBest[curPhase] = Math.max(phaseBest[curPhase], q[curPhase]);
-        if (q[curPhase] >= HOLD_COMPLETE_Q) {
-            phaseReached[curPhase] = true;
-            phaseUserPose[curPhase] = matches[curPhase].um.features.slice();
-        }
     }
 
     // Score = mean over phases of (best hold quality x movement-direction credit).
@@ -691,14 +696,14 @@ function scoreActiveModel(user) {
         else contrib = 0;
         sum += contrib * moveCredit(p);
     }
-    const displayScore = Math.round(clamp01(sum / P) * 99);
+    const displayScore = Math.min(100, Math.round(clamp01(sum / P) * 99 * 1.1));
 
     // Diagnose against the current phase's target (post-advance), in whichever
     // orientation matched.
     const target = holds[curPhase];
     const { idx: worstIdx, diff: worstDiff } = jointDiagnostic(matches[curPhase].um, target);
 
-    return { P, q, matches, displayScore, allPhasesReached: phaseReached.every(Boolean), worstIdx, worstDiff };
+    return { P, q, matches, displayScore, allPhasesReached: phaseReached.every(Boolean), worstIdx, worstDiff, bestIdx };
 }
 
 function analyzeFeedback(results) {
@@ -728,16 +733,19 @@ function analyzeFeedback(results) {
         missingLimbFrames = 0;
     }
 
-    const { P, q, matches, displayScore, allPhasesReached: done, worstIdx, worstDiff } = scoreActiveModel(user);
+    const { P, q, matches, displayScore, allPhasesReached: done, worstIdx, worstDiff, bestIdx } = scoreActiveModel(user);
     lastDisplayScore = displayScore;
 
     // Attempt restart: only after the learner FINISHED, then moved off the final
     // pose, then returned to the start pose (avoids false restarts on signs whose
     // start and end look alike). Single-sign practice only - a sentence session
-    // advances to the next WORD instead of restarting the same one.
+    // advances to the next WORD instead of restarting the same one. Same argmax
+    // requirement as scoreActiveModel's own completion check - q[0] alone can
+    // clear HOLD_COMPLETE_Q on a pose that actually resembles a LATER hold more
+    // (e.g. hold 4/5 looking similar to hold 0), falsely triggering a restart.
     if (P > 1 && phaseReached[P - 1]) {
         if (q[P - 1] < 0.35) leftFinalPose = true;
-        if (leftFinalPose && q[0] >= HOLD_COMPLETE_Q) {
+        if (leftFinalPose && q[0] >= HOLD_COMPLETE_Q && bestIdx === 0) {
             resetPhaseProgress();
             phaseBest[0] = q[0];
             phaseReached[0] = true;

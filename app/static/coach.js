@@ -796,7 +796,7 @@ function scoreActiveModel(user) {
     // budget. Evaluated live so the number reflects the delay as it happens
     // rather than arriving as a surprise at the end.
     const timePenalty = currentTimePenalty();
-    const displayScore = Math.min(100, Math.round(clamp01(sum / P) * timePenalty * 99));
+    const displayScore = Math.min(100, Math.round(clamp01(sum / P) * timePenalty * 100));
 
     // Diagnose against the current phase's target (post-advance), in whichever
     // orientation matched.

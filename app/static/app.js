@@ -39,6 +39,50 @@ function loadSiteData() {
     return siteDataPromise;
 }
 
+// A sign's difficulty is how many held poses it has: a 1-pose sign is a single
+// shape to hit, while a 5-pose sign is a whole ordered sequence, each pose
+// scored separately. Hold counts come from phases.json (the same file the coach
+// scores against), so difficulty can never drift out of sync with what the
+// learner is actually graded on. Cached like siteData - the browser already has
+// this file from the practice page.
+let holdCountByName = new Map();
+let difficultyPromise = null;
+
+const DIFFICULTY_TIERS = [
+    { max: 1, key: "easy", label: "Easy" },
+    { max: 2, key: "medium", label: "Medium" },
+    { max: 3, key: "hard", label: "Hard" },
+    { max: Infinity, key: "expert", label: "Expert" },
+];
+
+function loadDifficulty() {
+    if (!difficultyPromise) {
+        difficultyPromise = fetch("/phases.json", { cache: "no-cache" })
+            .then((r) => r.json())
+            .then((phases) => {
+                holdCountByName = new Map(
+                    Object.entries(phases).map(([name, model]) => [name, (model.holds || []).length])
+                );
+            })
+            .catch((err) => {
+                // Difficulty is decoration - a failed fetch hides the badges
+                // rather than taking the whole dictionary page down with it.
+                console.error("Could not load sign difficulty:", err);
+                holdCountByName = new Map();
+            });
+    }
+    return difficultyPromise;
+}
+
+// null for a sign with no phase model yet, so callers can omit the badge
+// instead of labelling an unknown sign "Easy".
+function difficultyFor(signName) {
+    const holds = holdCountByName.get(signName);
+    if (!holds) return null;
+    const tier = DIFFICULTY_TIERS.find((t) => holds <= t.max);
+    return { ...tier, holds };
+}
+
 // Template-based random sentence synthesis (not a translator, not an LLM
 // call) for the "Auto-generate" button - JS port of the same templates
 // main.py used to run server-side. English + gloss are produced together so
@@ -230,25 +274,56 @@ async function loadDictionary() {
     const category = document.getElementById("dict-category-select").value;
 
     try {
-        await loadSiteData();
-        const signs = category
+        await Promise.all([loadSiteData(), loadDifficulty()]);
+        const filtered = category
             ? siteData.dictionary.filter((s) => s.category === category)
             : siteData.dictionary;
         const container = document.getElementById("dictionary-container");
         container.innerHTML = "";
 
-        if (signs.length === 0) {
+        if (filtered.length === 0) {
             container.innerHTML = `<p style="grid-column: 1/-1; text-align:center; color:var(--text-secondary); margin-top:2rem;">No signs found in this category.</p>`;
             return;
         }
 
+        // Alphabetical by default so a known word stays findable; sorting by
+        // difficulty is opt-in, and keeps alphabetical order within each tier
+        // rather than leaving equal-difficulty signs in arbitrary order.
+        const sortEl = document.getElementById("dict-sort-select");
+        const sortBy = sortEl ? sortEl.value : "";
+        const signs = filtered.slice();
+        if (sortBy === "easiest" || sortBy === "hardest") {
+            const rank = (s) => {
+                const d = difficultyFor(s.sign_name);
+                return d ? d.holds : Infinity; // unknown difficulty sorts last either way
+            };
+            const dir = sortBy === "easiest" ? 1 : -1;
+            signs.sort((a, b) => {
+                const ra = rank(a), rb = rank(b);
+                if (ra !== rb) {
+                    if (ra === Infinity) return 1;
+                    if (rb === Infinity) return -1;
+                    return (ra - rb) * dir;
+                }
+                return a.sign_name.localeCompare(b.sign_name);
+            });
+        }
+
         signs.forEach((sign) => {
             const dictCard = document.createElement("div");
-            dictCard.className = "dict-card glass";
+            const diff = difficultyFor(sign.sign_name);
+            dictCard.className = "dict-card glass" + (diff ? ` diff-${diff.key}` : "");
             dictCard.onclick = () => startPractice(sign.sign_name, "Dictionary Search");
+            const poses = diff ? `${diff.holds} pose${diff.holds > 1 ? "s" : ""}` : "";
+            const diffTag = diff
+                ? `<span class="tag tag-${diff.key}" title="${poses} to match">${diff.label} · ${poses}</span>`
+                : "";
             dictCard.innerHTML = `
                 <h3>${sign.sign_name}</h3>
-                <span class="tag tag-category" style="margin-bottom:0.5rem; display:inline-block;">${sign.category}</span>
+                <div class="tag-list">
+                    <span class="tag tag-category">${sign.category}</span>
+                    ${diffTag}
+                </div>
                 <p>${sign.description || "Practice standard signs mapped directly from the INCLUDE dataset."}</p>
             `;
             container.appendChild(dictCard);

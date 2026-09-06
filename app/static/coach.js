@@ -993,22 +993,24 @@ function analyzeFeedback(results) {
     if (done) {
         // Score is locked now; hands off camera is what starts the next attempt.
         const praise = displayScore >= 75
-            ? `All ${P} pose${P > 1 ? "s" : ""} matched — excellent! `
-            : (displayScore < 60 ? "Try again more slowly, holding each position briefly. " : "");
+            ? "Excellent — you matched the whole sign! "
+            : (displayScore < 60 ? "Try again more slowly, following the reference closely. " : "");
         feedback = `${praise}Lower your hands to go again.`;
     } else if (q[curPhase] >= HOLD_COMPLETE_Q) {
-        // "matched" here is the looser per-frame test, not the one that banks a
-        // checkpoint, so on the LAST pose this can fire while the attempt is
-        // still unfinished - telling them to move on when there is nowhere left
-        // to move to. Ask them to hold it instead.
+        // Deliberately says nothing about which checkpoint this is. The model
+        // splits a sign into held poses to score it, but the learner performs
+        // one continuous movement and never experiences those divisions -
+        // consecutive checkpoints are small variations of each other (the median
+        // one already scores 0.82 from simply standing in the one before), and
+        // some sit ON the path between their neighbours, so "pose 3 of 5" named
+        // a boundary that isn't there and appeared to skip.
         const onLastPose = curPhase === P - 1;
-        if (P === 1) feedback = "Pose matched — hold it!";
-        else if (onLastPose) feedback = `Pose ${P} of ${P} — hold it steady.`;
-        else feedback = `Pose ${curPhase + 1} of ${P} ✓ — now the next one.`;
+        if (onLastPose) feedback = "That's it — hold it steady.";
+        else feedback = "Good — keep going.";
     } else if (worstIdx >= 0 && worstDiff > 0.18) {
-        feedback = `Pose ${curPhase + 1} of ${P}: ${FEATURE_FEEDBACK[worstIdx]}`;
+        feedback = FEATURE_FEEDBACK[worstIdx];
     } else {
-        feedback = `Move into pose ${curPhase + 1} of ${P} as shown in the reference.`;
+        feedback = "Follow the movement in the reference video.";
     }
 
     document.getElementById("coach-feedback-status").textContent = `Score: ${displayScore}%`;

@@ -642,23 +642,24 @@ function getMaskedVectorDistance(userFrame, refFrame) {
     // properly-formed ones and won matches they should have lost.
     let sum = 0;
     for (const g of FEATURE_GROUPS) {
+        // Skip a hand's SHAPE entirely when the reference isn't using that hand.
+        // A hand hanging at the side takes whatever shape it happens to fall
+        // into, in the reference and in the learner alike, so comparing the two
+        // scores noise - and it capped one-handed signs around 75% for anyone
+        // who kept their idle hand on camera. Wrist position is still compared
+        // (it is pose-derived and a resting hand really is down at the side).
+        if (g.needRight || g.needLeft) {
+            const side = g.needRight ? "right" : "left";
+            if (!refHandRequired(refFrame, side)) continue;
+        }
+
         let gradeable = true;
         if (g.needRight && !(uVis.rightHand && rVis.rightHand)) gradeable = false;
         if (g.needLeft && !(uVis.leftHand && rVis.leftHand)) gradeable = false;
         if (g.needPose && !(uVis.pose && rVis.pose)) gradeable = false;
 
-        // Two exemptions, both about NOT punishing the learner for something
-        // that isn't their doing:
-        //   - the reference itself never had this hand tracked, so there is
-        //     nothing to compare against (our data gap, not their mistake);
-        //   - the hand is resting at the signer's side in this pose, so it
-        //     carries no meaning whether it was tracked or not.
-        // A hand the learner is simply not showing is NOT exempt - that stays a
-        // real miss, and requiredLimbsMissing prompts them separately.
-        if (!gradeable && (g.needRight || g.needLeft)) {
-            const side = g.needRight ? "right" : "left";
-            if (!refHandRequired(refFrame, side)) continue;
-        }
+        // Anything still here is a hand the reference IS using, so a learner not
+        // showing it is a real miss and scores as maximum error.
 
         for (let i = g.start; i < g.end; i++) {
             const w = FEATURE_WEIGHTS[i];

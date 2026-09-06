@@ -657,7 +657,7 @@ function getMaskedVectorDistance(userFrame, refFrame) {
         // real miss, and requiredLimbsMissing prompts them separately.
         if (!gradeable && (g.needRight || g.needLeft)) {
             const side = g.needRight ? "right" : "left";
-            if (!refHandUsable(refFrame, side)) continue;
+            if (!refHandRequired(refFrame, side)) continue;
         }
 
         for (let i = g.start; i < g.end; i++) {
@@ -674,15 +674,24 @@ function getMaskedVectorDistance(userFrame, refFrame) {
     return Math.sqrt(sum / FEATURE_WEIGHT_TOTAL);
 }
 
-// Is this reference hold's `side` hand something we can fairly demand? No if the
-// reference never tracked it, and no if it was hanging at rest. Wrist height is
-// pose-derived, so it is still known even when the hand model lost the hand.
-function refHandUsable(refFrame, side) {
+// Is this reference hold's `side` hand something the learner must be showing?
+// Only if it is doing something: RAISED in this pose, and actually captured so
+// there is a handshape to compare against.
+//
+// Resting counts even when the tracker caught it. Most references keep the idle
+// hand in frame hanging at the signer's side, and a learner performing a
+// one-handed sign will often have theirs out of shot - demanding it there
+// scored 11 features as maximum error on a correct performance, which held 89%
+// of signs at zero.
+//
+// Height comes from the pose landmarks, so it is known whether or not the hand
+// model kept its lock.
+function refHandRequired(refFrame, side) {
     const tracked = side === "right" ? refFrame.visibility.rightHand : refFrame.visibility.leftHand;
-    if (tracked) return true;
-    if (!refFrame.visibility.pose) return false;
+    if (!tracked) return false;   // reference has no handshape here - nothing to compare against
+    if (!refFrame.visibility.pose) return true; // no height to judge by; assume it matters
     const wristY = side === "right" ? refFrame.features[23] : refFrame.features[25];
-    return wristY < HAND_ACTIVE_Y; // raised => genuinely in use, so its absence is a real gap
+    return wristY < HAND_ACTIVE_Y;
 }
 
 // Light per-feature EMA on the live user stream to damp landmark jitter.

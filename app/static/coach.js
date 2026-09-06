@@ -616,21 +616,6 @@ function clamp01(v) {
     return v < 0 ? 0 : (v > 1 ? 1 : v);
 }
 
-let lastSpokenTime = 0;
-let lastSpokenText = "";
-
-function speakFeedback(text) {
-    const now = performance.now();
-    if (now - lastSpokenTime >= 3500 && text !== lastSpokenText) {
-        lastSpokenTime = now;
-        lastSpokenText = text;
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 1.05;
-        window.speechSynthesis.speak(utterance);
-    }
-}
-
 function resetDTWSequences() {
     refSequence = [];
     rawRefSequence = [];
@@ -868,7 +853,6 @@ function analyzeFeedback(results) {
             document.getElementById("coach-feedback-status").textContent = "Show required limbs";
             document.getElementById("coach-feedback-message").textContent = limbMsg;
             document.getElementById("coach-score-display").textContent = `${lastDisplayScore}%`;
-            speakFeedback(limbMsg);
             updateCoachDebug({ P, curPhase, q: activePhaseModel.holds.map(() => 0), displayScore: lastDisplayScore, worstIdx: -1, worstDiff: 0, prompt: limbMsg });
             return;
         }
@@ -918,18 +902,12 @@ function analyzeFeedback(results) {
             ? `All ${P} pose${P > 1 ? "s" : ""} matched — excellent! `
             : (displayScore < 60 ? "Try again more slowly, holding each position briefly. " : "");
         feedback = `${praise}Lower your hands to go again.`;
-        speakFeedback(displayScore >= 75
-            ? "Excellent! Lower your hands to go again."
-            : "Lower your hands to go again.");
     } else if (q[curPhase] >= HOLD_COMPLETE_Q) {
         feedback = P > 1 ? `Phase ${curPhase + 1}/${P} matched — move to the next pose.` : "Pose matched — hold it!";
-        speakFeedback(P > 1 ? "Good. Now the next pose." : "Pose matched.");
     } else if (worstIdx >= 0 && worstDiff > 0.18) {
         feedback = `Phase ${curPhase + 1}/${P}: ${FEATURE_FEEDBACK[worstIdx]}`;
-        speakFeedback(FEATURE_FEEDBACK[worstIdx]);
     } else {
         feedback = `Move into phase ${curPhase + 1} of ${P} as shown in the reference.`;
-        speakFeedback("Match the next pose in the sign.");
     }
 
     document.getElementById("coach-feedback-status").textContent = `Score: ${displayScore}%`;
@@ -1248,7 +1226,6 @@ function analyzeSentenceFeedback(results) {
         if (missingLimbFrames >= 3) {
             document.getElementById("coach-feedback-status").textContent = "Show required limbs";
             document.getElementById("coach-feedback-message").textContent = limbMsg;
-            speakFeedback(limbMsg);
             return;
         }
     } else {
@@ -1289,7 +1266,6 @@ function analyzeSentenceFeedback(results) {
         document.getElementById("coach-feedback-status").textContent = "Out of order?";
         document.getElementById("coach-feedback-message").textContent = msg;
         document.getElementById("coach-score-display").textContent = `${result.displayScore}%`;
-        speakFeedback(msg);
     } else {
         document.getElementById("coach-feedback-status").textContent = `Score: ${result.displayScore}%`;
         document.getElementById("coach-feedback-message").textContent = result.allPhasesReached
@@ -1318,7 +1294,6 @@ function finishSentenceSession(finalScore) {
     document.getElementById("coach-feedback-message").textContent =
         `All ${sentenceGloss.length} words matched — score ${finalScore}%.`;
     document.getElementById("coach-score-display").textContent = `${finalScore}%`;
-    speakFeedback("Great job! You signed the whole sentence.");
 }
 
 function updateSentenceDebug(result, bestWord, bestQ, curIdx) {

@@ -167,7 +167,7 @@
                     <div class="overlay-label">📹 REFERENCE VIDEO PLAYER</div>
                     
                     <div id="video-viewport-container" style="position: relative; width: 100%; height: 400px; background: #000; overflow: hidden; border-radius: 12px; border: 1px solid var(--border-color);">
-                        <video id="practice-ref-video" style="width: 100%; height: 100%; object-fit: contain; display: none;" loop playsinline></video>
+                        <video id="practice-ref-video" style="width: 100%; height: 100%; object-fit: contain; display: none;" loop muted playsinline></video>
                         <!-- Never shown/played - sentence mode's video chain (coach.js loadChainedWord)
                              loads the NEXT clip's URL into this element while the current one is still
                              playing, so it's already in the browser's HTTP cache by the time the visible
@@ -206,7 +206,7 @@
                     <div class="overlay-label">📹 REAL-TIME AI COACH</div>
                     
                     <!-- Raw Webcam stream (hidden) -->
-                    <video id="webcam-raw" autoplay playsinline></video>
+                    <video id="webcam-raw" autoplay muted playsinline></video>
                     <!-- MediaPipe Landmarks rendered canvas -->
                     <canvas id="webcam-canvas"></canvas>
                     
@@ -284,6 +284,6 @@
     <!-- Application scripts -->
     <script src="/gloss_matching.js?v=1"></script>
     <script src="/app.js?v=64"></script>
-    <script src="/coach.js?v=70"></script>
+    <script src="/coach.js?v=71"></script>
 </body>
 </html>

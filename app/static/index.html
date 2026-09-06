@@ -261,7 +261,7 @@
                     <input type="checkbox" id="toggle-coach-debug" checked onchange="setCoachDebug(this.checked)" style="cursor:pointer;">
                     🐞 Debug
                 </label>
-                <div id="coach-debug" style="flex:1; font-family:monospace; font-size:0.75rem; color:var(--text-secondary); background:rgba(0,0,0,0.25); border:1px solid var(--border-color); border-radius:6px; padding:0.4rem 0.6rem; overflow-x:auto; white-space:nowrap;">
+                <div id="coach-debug" style="flex:1; font-family:monospace; font-size:0.75rem; color:var(--text-secondary); background:rgba(0,0,0,0.25); border:1px solid var(--border-color); border-radius:6px; padding:0.4rem 0.6rem; overflow-x:auto; white-space:pre-wrap; line-height:1.5;">
                     Start the camera and perform the sign — the live score breakdown will appear here.
                 </div>
             </div>
@@ -284,6 +284,6 @@
     <!-- Application scripts -->
     <script src="/gloss_matching.js?v=1"></script>
     <script src="/app.js?v=64"></script>
-    <script src="/coach.js?v=79"></script>
+    <script src="/coach.js?v=81"></script>
 </body>
 </html>

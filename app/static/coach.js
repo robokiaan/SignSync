@@ -101,6 +101,7 @@ let activePhaseModel = null;   // { holds, moveDirs, holdTimes, requires }
 let phaseBest = [];            // best hold quality achieved per phase this attempt
 let phaseReached = [];         // has each phase been hit at least at HOLD_COMPLETE_Q?
 let phaseUserPose = [];        // user feature vector captured when each phase was reached
+let phaseErrorBreakdown = [];  // TEMP diagnostic: per-pose error split at its best frame
 let curPhase = 0;              // phase the learner is currently working toward
 let phaseEnteredAt = 0;        // performance.now() when curPhase last changed - see PHASE_TRANSITION_DELAY_MS
 let attemptComplete = false;   // final checkpoint banked; waiting for hands to leave before re-arming
@@ -309,6 +310,7 @@ function resetPhaseProgress() {
     phaseBest = new Array(P).fill(0);
     phaseReached = new Array(P).fill(false);
     phaseUserPose = new Array(P).fill(null);
+    phaseErrorBreakdown = new Array(P).fill(null);
     curPhase = 0;
     phaseEnteredAt = performance.now();
     attemptComplete = false;
@@ -690,6 +692,50 @@ function getMaskedVectorDistance(userFrame, refFrame) {
     return Math.sqrt(sum / FEATURE_WEIGHT_TOTAL);
 }
 
+// TEMP diagnostic: where is the residual error coming from? Splits the same
+// weighted squared error getMaskedVectorDistance sums into the six things a
+// pose is made of, so a learner performing correctly can see whether their
+// remaining gap is handshape (real signal) or palm angle / hand position
+// (which shift with camera placement and body proportions, and are already
+// down-weighted for that reason). Delete once the weights are settled.
+const ERROR_GROUPS = [
+    { label: "R fingers", start: 0, end: 5, needRight: true },
+    { label: "R palm angle", start: 5, end: 8, needRight: true },
+    { label: "R finger spread", start: 8, end: 9, needRight: true },
+    { label: "L fingers", start: 9, end: 14, needLeft: true },
+    { label: "L palm angle", start: 14, end: 17, needLeft: true },
+    { label: "L finger spread", start: 17, end: 18, needLeft: true },
+    { label: "elbows", start: 18, end: 20, needPose: true },
+    { label: "shoulders", start: 20, end: 22, needPose: true },
+    { label: "R hand position", start: 22, end: 24, needPose: true },
+    { label: "L hand position", start: 24, end: 26, needPose: true },
+];
+
+function errorBreakdown(userFrame, refFrame) {
+    const uVis = userFrame.visibility, rVis = refFrame.visibility;
+    const uf = userFrame.features, rf = refFrame.features;
+    const rows = [];
+    let total = 0;
+    for (const g of ERROR_GROUPS) {
+        if (g.needRight || g.needLeft) {
+            const side = g.needRight ? "right" : "left";
+            if (!refHandRequired(refFrame, side)) { rows.push({ label: g.label, err: null }); continue; }
+        }
+        let gradeable = true;
+        if (g.needRight && !(uVis.rightHand && rVis.rightHand)) gradeable = false;
+        if (g.needLeft && !(uVis.leftHand && rVis.leftHand)) gradeable = false;
+        if (g.needPose && !(uVis.pose && rVis.pose)) gradeable = false;
+        let err = 0;
+        for (let i = g.start; i < g.end; i++) {
+            const w = FEATURE_WEIGHTS[i];
+            err += gradeable ? w * (uf[i] - rf[i]) * (uf[i] - rf[i]) : w;
+        }
+        rows.push({ label: g.label, err });
+        total += err;
+    }
+    return { rows, total };
+}
+
 // Is this reference hold's `side` hand something the learner must be showing?
 // Only if it is doing something: RAISED in this pose, and actually captured so
 // there is a handshape to compare against.
@@ -766,7 +812,10 @@ function scoreActiveModel(user) {
     // outright win: two holds in one sign can be genuinely identical, and an
     // exact tie resolved to whichever came first, leaving the later one
     // permanently unreachable.
-    phaseBest[curPhase] = Math.max(phaseBest[curPhase], q[curPhase]);
+    if (q[curPhase] > phaseBest[curPhase]) {
+        phaseBest[curPhase] = q[curPhase];
+        phaseErrorBreakdown[curPhase] = errorBreakdown(matches[curPhase].um, holds[curPhase]); // TEMP diagnostic
+    }
     if (q[curPhase] >= HOLD_COMPLETE_Q && q[curPhase] >= q[bestIdx] - MATCH_TOLERANCE) {
         if (!phaseReached[curPhase]) {
             // Close off the transition that led here, for the time penalty.
@@ -788,7 +837,10 @@ function scoreActiveModel(user) {
     ) {
         curPhase++;
         phaseEnteredAt = performance.now();
-        phaseBest[curPhase] = Math.max(phaseBest[curPhase], q[curPhase]);
+        if (q[curPhase] > phaseBest[curPhase]) {
+            phaseBest[curPhase] = q[curPhase];
+            phaseErrorBreakdown[curPhase] = errorBreakdown(matches[curPhase].um, holds[curPhase]); // TEMP
+        }
     }
 
     // Score = mean over phases of (best hold quality x movement-direction credit).
@@ -1566,6 +1618,8 @@ async function showWordPhaseFrames(word) {
 }
 
 // Live scoring breakdown so calibration can be data-driven against a real camera.
+const NEWLINE = String.fromCharCode(10); // TEMP diagnostic helper
+
 function updateCoachDebug(d) {
     const el = document.getElementById("coach-debug");
     if (!el) return;
@@ -1575,9 +1629,22 @@ function updateCoachDebug(d) {
     const bests = phaseBest.map((x) => x.toFixed(2)).join(",");
     const reached = phaseReached.map((x) => (x ? "✓" : "·")).join("");
     const worst = d.worstIdx >= 0 ? `${d.worstIdx} Δ${d.worstDiff.toFixed(2)}` : "none";
+    // TEMP diagnostic: where each pose's best-frame error actually sat.
+    const breakdown = phaseErrorBreakdown.map((b, i) => {
+        if (!b || !b.total) return null;
+        const parts = b.rows
+            .filter((r) => r.err !== null && r.err > 0)
+            .sort((a, c) => c.err - a.err)
+            .map((r) => `${r.label} ${Math.round(100 * r.err / b.total)}%`);
+        return `  pose ${i + 1} (best ${phaseBest[i].toFixed(2)}): ${parts.join(", ")}`;
+    }).filter(Boolean);
+
     el.textContent =
         `phases ${d.P} | on ${d.curPhase + 1}/${d.P} | q[${qs}] | best[${bests}] | reached ${reached} | ` +
-        `score ${d.displayScore}% | worst joint: ${worst}`;
+        `score ${d.displayScore}% | worst joint: ${worst}` +
+        (breakdown.length ? `
+error split at each pose's best frame:
+${breakdown.join(NEWLINE)}` : "");
 }
 
 // ---------------------------------------------------------------------------

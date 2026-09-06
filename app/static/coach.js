@@ -842,6 +842,40 @@ function analyzeFeedback(results) {
         return;
     }
 
+    // Taking both hands off camera ends the attempt, finished or not - it's the
+    // learner saying "I'm done with this go". Tracked before the missing-limb
+    // prompt below, because that prompt returns early and would otherwise stop
+    // an abandoned attempt from ever clearing.
+    //
+    // HANDS_AWAY_RESET_MS is what separates "put my hands down" from "the
+    // tracker blinked": hand tracking drops for a frame or two during fast
+    // motion, and a blink must never wipe an attempt in progress.
+    const handsVisible = user.visibility.rightHand || user.visibility.leftHand;
+    if (handsVisible) {
+        handsAwaySince = 0;
+    } else if (!handsAwaySince) {
+        handsAwaySince = performance.now();
+    }
+    const somethingToClear = attemptComplete || phaseReached.some(Boolean);
+    if (somethingToClear && !handsVisible && handsAwaySince
+        && performance.now() - handsAwaySince >= HANDS_AWAY_RESET_MS) {
+        // Only fires when there is progress to clear, so simply standing away
+        // from the camera doesn't re-reset every HANDS_AWAY_RESET_MS.
+        const wasMidAttempt = !attemptComplete && phaseReached.some(Boolean);
+        attemptComplete = false;
+        attemptArmed = true;      // next first-checkpoint hit starts a fresh attempt
+        handsAwaySince = 0;
+        resetPhaseProgress();
+        prevUserSmoothed = null;  // don't blend across the gap
+        document.getElementById("coach-score-display").textContent = "0%";
+        document.getElementById("coach-feedback-status").textContent = "Ready";
+        document.getElementById("coach-feedback-message").textContent = wasMidAttempt
+            ? "Attempt cleared. Start the sign whenever you're ready."
+            : "Start the sign whenever you're ready.";
+        updateCoachDebug({ P: activePhaseModel.holds.length, curPhase, q: activePhaseModel.holds.map(() => 0), displayScore: 0, worstIdx: -1, worstDiff: 0, prompt: "hands away - reset" });
+        return;
+    }
+
     // Prompt (debounced) if the sign needs limbs the learner isn't showing, and
     // freeze the score meanwhile so it can't be gamed by hiding a required hand.
     const need = activePhaseModel.requires;
@@ -863,35 +897,11 @@ function analyzeFeedback(results) {
     const { P, q, matches, displayScore, allPhasesReached: done, worstIdx, worstDiff, bestIdx } = scoreActiveModel(user);
     lastDisplayScore = displayScore;
 
-    // Attempt lifecycle. An attempt ends when the final checkpoint is banked;
-    // the score then LOCKS on screen and the next attempt cannot begin until the
-    // learner takes their hands off camera. Hands-away is a yes/no from the
-    // tracker rather than a pose comparison, so unlike the old "did they return
-    // to the start pose" test it cannot be fooled by the 81% of signs whose
-    // final pose resembles their first. HANDS_AWAY_RESET_MS guards the other
-    // direction: hand tracking drops for a frame or two during fast motion, and
-    // a blink like that must never wipe an attempt in progress.
-    const handsVisible = user.visibility.rightHand || user.visibility.leftHand;
-    if (handsVisible) {
-        handsAwaySince = 0;
-    } else if (!handsAwaySince) {
-        handsAwaySince = performance.now();
-    }
-    const handsGoneLongEnough = handsAwaySince && performance.now() - handsAwaySince >= HANDS_AWAY_RESET_MS;
-
+    // Finishing locks the score on screen; taking the hands away (handled above)
+    // is what clears it and arms the next attempt.
     if (done && !attemptComplete) {
         attemptComplete = true;
         attemptArmed = false;
-    }
-    if (attemptComplete && handsGoneLongEnough) {
-        attemptComplete = false;
-        attemptArmed = true;      // next first-checkpoint hit starts a fresh attempt
-        resetPhaseProgress();
-        prevUserSmoothed = null;  // don't blend across the gap
-        document.getElementById("coach-score-display").textContent = "0%";
-        document.getElementById("coach-feedback-status").textContent = "Ready";
-        document.getElementById("coach-feedback-message").textContent = "Start the sign whenever you're ready.";
-        return;
     }
 
     // Feedback focuses on the current phase (diagnose against the matched orientation).

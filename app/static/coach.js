@@ -24,7 +24,7 @@ let isWebcamActive = false;
 // learner is graded by how well they hit each hold pose, in order (+ a light
 // check that the moves go the right way). Because holds are the target, holding
 // a pose no longer collapses the score, and feedback is per-phase.
-const HOLD_MATCH_THRESHOLD = 0.50; // masked distance at which a hold's quality hits 0
+const HOLD_MATCH_THRESHOLD = 0.60; // masked distance at which a hold's quality hits 0
 const HOLD_COMPLETE_Q = 0.55;      // quality above which a phase counts as "reached"
 const REF_MOTION_HOLD_FRAC = 0.45; // ref frame is a hold if motion < this fraction of the sign's peak motion
 const REF_MIN_HOLD_MOTION = 0.025; // absolute floor for the hold-motion threshold
@@ -779,12 +779,19 @@ function scoreActiveModel(user) {
     // Score = mean over phases of (best hold quality x movement-direction credit).
     // Completed phases keep their best (latched), so holding the final pose can't
     // make the score collapse; unreached phases contribute 0.
+    // Only poses the learner has actually BANKED count. Previously the pose
+    // being worked on contributed its live quality, so once the state machine
+    // advanced you were credited for a pose you had not hit - and because
+    // consecutive poses in a sign resemble each other (the two in "he" match
+    // each other at 0.62), simply standing in the previous pose scored most of
+    // the next one. Half of "he" performed read as 81%.
+    //
+    // The score is now what it claims to be: how much of the sign you have
+    // completed, weighted by how well. The feedback line still guides the pose
+    // in progress, so nothing is lost but the flattery.
     let sum = 0;
     for (let p = 0; p < P; p++) {
-        let contrib;
-        if (p === curPhase) contrib = Math.max(phaseBest[p], q[p]);
-        else if (phaseReached[p] || p < curPhase) contrib = phaseBest[p];
-        else contrib = 0;
+        const contrib = phaseReached[p] ? phaseBest[p] : 0;
         sum += contrib * moveCredit(p);
     }
     // Taking too long multiplies the whole attempt, compounding per overrun

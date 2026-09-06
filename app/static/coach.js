@@ -922,11 +922,18 @@ function analyzeFeedback(results) {
             : (displayScore < 60 ? "Try again more slowly, holding each position briefly. " : "");
         feedback = `${praise}Lower your hands to go again.`;
     } else if (q[curPhase] >= HOLD_COMPLETE_Q) {
-        feedback = P > 1 ? `Phase ${curPhase + 1}/${P} matched — move to the next pose.` : "Pose matched — hold it!";
+        // "matched" here is the looser per-frame test, not the one that banks a
+        // checkpoint, so on the LAST pose this can fire while the attempt is
+        // still unfinished - telling them to move on when there is nowhere left
+        // to move to. Ask them to hold it instead.
+        const onLastPose = curPhase === P - 1;
+        if (P === 1) feedback = "Pose matched — hold it!";
+        else if (onLastPose) feedback = `Pose ${P} of ${P} — hold it steady.`;
+        else feedback = `Pose ${curPhase + 1} of ${P} ✓ — now the next one.`;
     } else if (worstIdx >= 0 && worstDiff > 0.18) {
-        feedback = `Phase ${curPhase + 1}/${P}: ${FEATURE_FEEDBACK[worstIdx]}`;
+        feedback = `Pose ${curPhase + 1} of ${P}: ${FEATURE_FEEDBACK[worstIdx]}`;
     } else {
-        feedback = `Move into phase ${curPhase + 1} of ${P} as shown in the reference.`;
+        feedback = `Move into pose ${curPhase + 1} of ${P} as shown in the reference.`;
     }
 
     document.getElementById("coach-feedback-status").textContent = `Score: ${displayScore}%`;

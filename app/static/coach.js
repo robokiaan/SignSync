@@ -42,7 +42,22 @@ const PHASE_MERGE_DIST = 0.10;     // merge consecutive ref holds whose targets 
 // "alright", whose intentional 3->1 collapse (bookends pinned at Y=1.0, real
 // thumbs-up content at Y=0.902) must survive any reasonable threshold here.
 const REST_FLOOR = 0.95;
-const MOVE_WEIGHT = 0.20;          // how much movement-direction agreement modulates a phase's credit
+// How much movement-direction agreement modulates a phase's credit. Currently 0
+// - the check is disabled rather than deleted.
+//
+// It compares the straight line between two banked poses against the same line
+// in the reference, but the measurement is dominated by noise: a learner
+// performing correctly (hold quality ~0.7) reproduces the reference direction at
+// only ~0.44 agreement, and the result was clamped so that moving BACKWARDS
+// scored the same as moving sideways. It was therefore taking up to 20% off a
+// pose on the strength of a reading that barely distinguishes right from wrong,
+// which cost real points on correct performances.
+//
+// Re-enable once the measurement is worth trusting: average the frames a pose is
+// held for (agreement 0.44 -> 0.71), ignore movements below 0.20 where the
+// travel is too small to measure, and use the full -1..+1 range so backwards is
+// worse than sideways rather than equal to it.
+const MOVE_WEIGHT = 0;
 // Feature indices that carry hand position/orientation (used for move direction).
 const POSITION_DIMS = [5, 6, 7, 14, 15, 16, 22, 23, 24, 25];
 // Minimum time the learner must dwell in a phase before the state machine will

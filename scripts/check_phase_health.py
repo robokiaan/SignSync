@@ -8,8 +8,10 @@ the scoring code does:
   1. Duplicate checkpoints - two holds in one sign that came out identical.
      Whichever is checked second can never be the better match, so the sign
      cannot be completed.
-  2. Hand-less checkpoints - the hand tracker lost the hands on the reference,
-     so the target carries no handshape. Any handshape then scores full marks.
+  2. Hand-less checkpoints - no hand's SHAPE is graded against the target, so
+     any handshape scores full marks and the checkpoint is really just an
+     upper-body silhouette. Mirrors coach.js refHandRequired rather than asking
+     whether the tracker saw a hand, which is a different and much rarer fault.
      Only matters where the hand was RAISED; a hand resting at the signer's side
      carries no meaning whether it was tracked or not.
   3. Rest-only checkpoints - a hold marked while the hands are down, i.e. in the
@@ -44,6 +46,7 @@ WEIGHTS = [1, 1, 1, 1, 1, .4, .4, .2, .5,
 WEIGHT_TOTAL = sum(WEIGHTS)
 HOLD_MATCH_THRESHOLD = 0.50
 HAND_ACTIVE_Y = 0.85
+ELBOW_ACTIVE = 0.70
 DUPLICATE_Q = 0.98   # two holds this close are effectively the same pose
 
 
@@ -69,6 +72,30 @@ def quality(a, b):
     return clamp01(1 - distance(a, b) / HOLD_MATCH_THRESHOLD)
 
 
+def hand_graded(hold, side):
+    """Mirrors coach.js refHandRequired: is this hand's SHAPE actually compared?
+
+    Only a hand the reference is using gets graded, and 'using' is wrist height
+    OR a bent elbow. The elbow half matters because pose-derived wrist height
+    clamps at 1.0 for hands worked in front of the torso, which reads identically
+    to an arm hanging at the side.
+
+    The earlier version of this check asked a different question - had the hand
+    TRACKER lost the hand - and so reported nothing wrong with signs the runtime
+    was grading on no handshape at all.
+    """
+    tracked = hold["visibility"]["rightHand" if side == "right" else "leftHand"]
+    if not tracked:
+        return False
+    if not hold["visibility"]["pose"]:
+        return True
+    y = hold["features"][23] if side == "right" else hold["features"][25]
+    if y < HAND_ACTIVE_Y:
+        return True
+    elbow = hold["features"][18] if side == "right" else hold["features"][19]
+    return elbow < ELBOW_ACTIVE
+
+
 def hand_raised(hold, side):
     """Wrist height comes from the pose landmarks, so it survives hand-tracking
     loss. Lower value = higher up."""
@@ -92,8 +119,10 @@ def main():
         holds = model.get("holds", [])
 
         for p, hold in enumerate(holds):
-            vis = hold["visibility"]
-            if not vis["rightHand"] and not vis["leftHand"]:
+            # What the RUNTIME grades, not what the tracker saw: a checkpoint
+            # with no graded hand is scored on elbows, shoulders and wrist
+            # position alone, which almost any upright pose satisfies.
+            if not hand_graded(hold, "right") and not hand_graded(hold, "left"):
                 raised = hand_raised(hold, "right") or hand_raised(hold, "left")
                 handless.append((name, p + 1, len(holds), raised))
                 if not raised and len(holds) == 1:
@@ -122,7 +151,7 @@ def main():
 
     raised = [h for h in handless if h[3]]
     resting = [h for h in handless if not h[3]]
-    print("2. HAND-LESS CHECKPOINTS - reference carries no handshape")
+    print("2. HAND-LESS CHECKPOINTS - no handshape is graded against")
     print("     total: %d across %d signs" % (len(handless), len({h[0] for h in handless})))
     print("     hand RAISED (real gap, needs re-marking): %d across %d signs"
           % (len(raised), len({h[0] for h in raised})))

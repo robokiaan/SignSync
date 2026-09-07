@@ -81,6 +81,29 @@ const MATCH_TOLERANCE = 0.05;
 // hand counts as raised and therefore in use. Matches requiredLimbs' own test.
 const HAND_ACTIVE_Y = 0.85;
 
+// Elbow angle (0..1 = 0..180 degrees) below which the arm is bent enough that
+// the hand is being used, whatever the wrist height says.
+//
+// Wrist height alone is not enough, because it comes from the POSE landmarks,
+// and MediaPipe drags those toward the hips whenever the hands are worked in
+// front of the torso - then wristLocation's (bodyDown + 2) / 4 clamps at
+// exactly 1.0, which is indistinguishable from an arm hanging at the side. Half
+// of every tracked hand in the reference set (531 of 1056) was being written
+// off as resting because of it, and a checkpoint with both hands written off
+// grades no handshape at all: "doctor" scored 0.84 against an arbitrary pose
+// and 0.835 against "she", so a sentence like "she doctor" completed itself.
+//
+// The elbow is the corroborating signal, and it separates the two populations
+// cleanly: hands actually being signed with sit at 0.41-0.66, arms genuinely
+// hanging at 0.78-0.85. Measured over every reference checkpoint, adding this
+// takes "doctor"'s mean confusion against the rest of the dictionary from 0.84
+// to 0.297 and the poses clearing its bank threshold from 596/617 to 91/617,
+// while a learner whose idle hand simply falls differently still scores 1.000
+// (grading every tracked hand instead - no wrist or elbow test - costs that
+// learner 0.786 mean and 0.355 worst case, which is the regression this whole
+// gate exists to prevent).
+const ELBOW_ACTIVE = 0.70;
+
 // How long the learner must have no hands on camera before a finished attempt
 // closes and the next one can start. Hand tracking flickers for a frame or two
 // during fast motion, so this has to be long enough that a dropout mid-sign is
@@ -754,9 +777,14 @@ function errorBreakdown(userFrame, refFrame) {
 function refHandRequired(refFrame, side) {
     const tracked = side === "right" ? refFrame.visibility.rightHand : refFrame.visibility.leftHand;
     if (!tracked) return false;   // reference has no handshape here - nothing to compare against
-    if (!refFrame.visibility.pose) return true; // no height to judge by; assume it matters
+    if (!refFrame.visibility.pose) return true; // nothing to judge by; assume it matters
     const wristY = side === "right" ? refFrame.features[23] : refFrame.features[25];
-    return wristY < HAND_ACTIVE_Y;
+    if (wristY < HAND_ACTIVE_Y) return true;
+    // Wrist height says "down", but pose-derived wrist height is unreliable for
+    // hands held in front of the body - see ELBOW_ACTIVE. A bent elbow means the
+    // arm is doing something, so the handshape is real and must be graded.
+    const elbow = side === "right" ? refFrame.features[18] : refFrame.features[19];
+    return elbow < ELBOW_ACTIVE;
 }
 
 // Light per-feature EMA on the live user stream to damp landmark jitter.

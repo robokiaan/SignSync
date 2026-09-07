@@ -843,29 +843,12 @@ function scoreActiveModel(user) {
         }
     }
 
-    // Score = mean over phases of (best hold quality x movement-direction credit).
-    // Completed phases keep their best (latched), so holding the final pose can't
-    // make the score collapse; unreached phases contribute 0.
-    // Only poses the learner has actually BANKED count. Previously the pose
-    // being worked on contributed its live quality, so once the state machine
-    // advanced you were credited for a pose you had not hit - and because
-    // consecutive poses in a sign resemble each other (the two in "he" match
-    // each other at 0.62), simply standing in the previous pose scored most of
-    // the next one. Half of "he" performed read as 81%.
-    //
-    // The score is now what it claims to be: how much of the sign you have
-    // completed, weighted by how well. The feedback line still guides the pose
-    // in progress, so nothing is lost but the flattery.
-    let sum = 0;
-    for (let p = 0; p < P; p++) {
-        const contrib = phaseReached[p] ? phaseBest[p] : 0;
-        sum += contrib * moveCredit(p);
-    }
     // Taking too long multiplies the whole attempt, compounding per overrun
     // budget. Evaluated live so the number reflects the delay as it happens
-    // rather than arriving as a surprise at the end.
+    // rather than arriving as a surprise at the end. Sentences are untimed, so
+    // this is 1 there (see buildCombinedPhaseModel).
     const timePenalty = currentTimePenalty();
-    const displayScore = Math.min(100, Math.round(clamp01(sum / P) * timePenalty * 100));
+    const displayScore = Math.min(100, Math.round(aggregatePhaseScore(P) * timePenalty * 100));
 
     // Diagnose against the current phase's target (post-advance), in whichever
     // orientation matched.
@@ -873,6 +856,45 @@ function scoreActiveModel(user) {
     const { idx: worstIdx, diff: worstDiff } = jointDiagnostic(matches[curPhase].um, target);
 
     return { P, q, matches, displayScore, allPhasesReached: phaseReached.every(Boolean), worstIdx, worstDiff, bestIdx, timePenalty };
+}
+
+// How the banked per-checkpoint qualities add up to one score.
+//
+// Only checkpoints the learner has actually BANKED count. The one being worked
+// on contributes nothing: it used to contribute its live quality, so once the
+// state machine advanced you were credited for a pose you had not hit - and
+// because consecutive poses in a sign resemble each other (the two in "he"
+// match each other at 0.62), simply standing in the previous pose scored most
+// of the next one. Half of "he" performed read as 81%. Banked qualities latch,
+// so the number only ever climbs within an attempt.
+//
+// A plain sign averages over its checkpoints. A SENTENCE averages per word
+// first, then over words, so every word is worth the same 1/N regardless of how
+// many checkpoints it happens to have - otherwise a 5-checkpoint word counted
+// five times a 1-checkpoint one, and finishing the short words moved the number
+// almost not at all. Words with no phase model contribute nothing and are left
+// out of the divisor rather than counted as zero, which would make the sentence
+// unscorable through no fault of the learner.
+function aggregatePhaseScore(P) {
+    const phaseValue = (p) => (phaseReached[p] ? phaseBest[p] : 0) * moveCredit(p);
+    const ranges = activePhaseModel && activePhaseModel.wordPhaseRanges;
+
+    if (!ranges || ranges.length === 0) {
+        let sum = 0;
+        for (let p = 0; p < P; p++) sum += phaseValue(p);
+        return clamp01(sum / P);
+    }
+
+    let sum = 0;
+    let scorableWords = 0;
+    for (const [start, end] of ranges) {
+        if (end <= start) continue;
+        let wordSum = 0;
+        for (let p = start; p < end; p++) wordSum += phaseValue(p);
+        sum += wordSum / (end - start);
+        scorableWords++;
+    }
+    return scorableWords ? clamp01(sum / scorableWords) : 0;
 }
 
 // --- Time penalty -----------------------------------------------------------
@@ -884,9 +906,12 @@ function scoreActiveModel(user) {
 // single-checkpoint signs carry no penalty at all.
 function transitionBudgetMs() {
     if (!activePhaseModel) return Infinity;
+    // Checked BEFORE the lazy resolve below, which would otherwise read a
+    // duration off the shared reference <video> that has nothing to do with
+    // this model. See buildCombinedPhaseModel.
+    if (activePhaseModel.untimed) return Infinity;
     // Duration often isn't known yet when the model is activated (metadata still
-    // loading), so resolve it lazily and cache. Sentence practice has no single
-    // clip, so it never resolves one and the penalty simply never fires there.
+    // loading), so resolve it lazily and cache.
     if (!activePhaseModel.clipDuration) {
         const refVideo = document.getElementById("practice-ref-video");
         const d = refVideo && refVideo.duration;
@@ -918,6 +943,53 @@ function recordTransitionTiming(phaseIdx) {
     timeCrossings += crossingsFor(performance.now() - phaseEnteredAt);
 }
 
+// Taking both hands off camera ends the attempt, finished or not - it's the
+// learner saying "I'm done with this go". Called before the missing-limb prompt
+// in both scorers, because that prompt returns early and would otherwise stop
+// an abandoned attempt from ever clearing.
+//
+// HANDS_AWAY_RESET_MS is what separates "put my hands down" from "the tracker
+// blinked": hand tracking drops for a frame or two during fast motion, and a
+// blink must never wipe an attempt in progress.
+//
+// Shared by single-sign and sentence practice. In a sentence the combined model
+// spans every word, so clearing it puts the learner back on word 1 - which is
+// also the ONLY way a sentence restarts now.
+//
+// Returns true if it cleared the attempt and the caller should stop here.
+function clearAttemptIfHandsAway(user) {
+    const handsVisible = user.visibility.rightHand || user.visibility.leftHand;
+    if (handsVisible) {
+        handsAwaySince = 0;
+        return false;
+    }
+    if (!handsAwaySince) handsAwaySince = performance.now();
+
+    // Only fires when there is progress to clear, so simply standing away from
+    // the camera doesn't re-reset every HANDS_AWAY_RESET_MS.
+    const somethingToClear = attemptComplete || phaseReached.some(Boolean);
+    if (!somethingToClear || performance.now() - handsAwaySince < HANDS_AWAY_RESET_MS) return false;
+
+    const wasMidAttempt = !attemptComplete && phaseReached.some(Boolean);
+    attemptComplete = false;
+    attemptArmed = true;      // next first-checkpoint hit starts a fresh attempt
+    handsAwaySince = 0;
+    resetPhaseProgress();
+    prevUserSmoothed = null;  // don't blend across the gap
+
+    const restartTarget = sentenceActive && sentenceViewMode === "all" && sentenceGloss.length
+        ? `"${sentenceGloss[0]}"`
+        : "the sign";
+    document.getElementById("coach-score-display").textContent = "0%";
+    document.getElementById("coach-feedback-status").textContent = "Ready";
+    document.getElementById("coach-feedback-message").textContent = wasMidAttempt
+        ? `Attempt cleared. Start again from ${restartTarget} whenever you're ready.`
+        : `Start from ${restartTarget} whenever you're ready.`;
+    if (sentenceActive && sentenceViewMode === "all") renderGlossStrip();
+    else updateCoachDebug({ P: activePhaseModel.holds.length, curPhase, q: activePhaseModel.holds.map(() => 0), displayScore: 0, worstIdx: -1, worstDiff: 0, prompt: "hands away - reset" });
+    return true;
+}
+
 function analyzeFeedback(results) {
     const user = smoothUserFrame(extractFrameFeatures(results));
 
@@ -926,39 +998,7 @@ function analyzeFeedback(results) {
         return;
     }
 
-    // Taking both hands off camera ends the attempt, finished or not - it's the
-    // learner saying "I'm done with this go". Tracked before the missing-limb
-    // prompt below, because that prompt returns early and would otherwise stop
-    // an abandoned attempt from ever clearing.
-    //
-    // HANDS_AWAY_RESET_MS is what separates "put my hands down" from "the
-    // tracker blinked": hand tracking drops for a frame or two during fast
-    // motion, and a blink must never wipe an attempt in progress.
-    const handsVisible = user.visibility.rightHand || user.visibility.leftHand;
-    if (handsVisible) {
-        handsAwaySince = 0;
-    } else if (!handsAwaySince) {
-        handsAwaySince = performance.now();
-    }
-    const somethingToClear = attemptComplete || phaseReached.some(Boolean);
-    if (somethingToClear && !handsVisible && handsAwaySince
-        && performance.now() - handsAwaySince >= HANDS_AWAY_RESET_MS) {
-        // Only fires when there is progress to clear, so simply standing away
-        // from the camera doesn't re-reset every HANDS_AWAY_RESET_MS.
-        const wasMidAttempt = !attemptComplete && phaseReached.some(Boolean);
-        attemptComplete = false;
-        attemptArmed = true;      // next first-checkpoint hit starts a fresh attempt
-        handsAwaySince = 0;
-        resetPhaseProgress();
-        prevUserSmoothed = null;  // don't blend across the gap
-        document.getElementById("coach-score-display").textContent = "0%";
-        document.getElementById("coach-feedback-status").textContent = "Ready";
-        document.getElementById("coach-feedback-message").textContent = wasMidAttempt
-            ? "Attempt cleared. Start the sign whenever you're ready."
-            : "Start the sign whenever you're ready.";
-        updateCoachDebug({ P: activePhaseModel.holds.length, curPhase, q: activePhaseModel.holds.map(() => 0), displayScore: 0, worstIdx: -1, worstDiff: 0, prompt: "hands away - reset" });
-        return;
-    }
+    if (clearAttemptIfHandsAway(user)) return;
 
     // Prompt (debounced) if the sign needs limbs the learner isn't showing, and
     // freeze the score meanwhile so it can't be gamed by hiding a required hand.
@@ -1033,6 +1073,7 @@ function buildCombinedPhaseModel(words) {
     let handsMax = 0;
     let poseNeeded = false;
     const wordPhaseRanges = [];
+    const wordRequires = [];
 
     for (const word of words) {
         const model = phaseCache[word];
@@ -1045,9 +1086,26 @@ function buildCombinedPhaseModel(words) {
             poseNeeded = poseNeeded || model.requires.pose;
         }
         wordPhaseRanges.push([start, holds.length]);
+        // Each word keeps its OWN limb requirement. The max across the sentence
+        // (still computed above, for anything wanting a whole-sentence answer)
+        // is the wrong thing to prompt on: one two-handed word in the sentence
+        // made the coach demand two hands for every one-handed word in it too.
+        wordRequires.push(model && model.requires ? model.requires : { hands: 1, pose: true });
     }
 
-    return { holds, moveDirs, holdTimes, requires: { hands: handsMax, pose: poseNeeded }, wordPhaseRanges };
+    return {
+        holds, moveDirs, holdTimes,
+        requires: { hands: handsMax, pose: poseNeeded },
+        wordPhaseRanges, wordRequires,
+        // A sentence has no single reference clip to budget time against: the
+        // shared #practice-ref-video cycles one word's clip at a time, so
+        // transitionBudgetMs' lazy resolve picked up whichever word was playing
+        // (in practice the first) and applied 3x ITS length to every transition
+        // in the sentence, pause between words included. That made the score
+        // fall as the learner moved from word to word. Sentences are untimed
+        // until there is a per-transition budget from the owning word.
+        untimed: true,
+    };
 }
 
 // Which sentenceGloss word the combined model's curPhase currently belongs
@@ -1060,6 +1118,14 @@ function currentWordIndex() {
         if (curPhase >= ranges[i][0] && curPhase < ranges[i][1]) return i;
     }
     return ranges.length - 1; // curPhase past the last range - sentence is done, report the last word
+}
+
+// The limb requirement of the word the learner is on right now. Falls back to
+// the whole-model requirement for anything without per-word data.
+function currentWordRequires() {
+    const perWord = activePhaseModel && activePhaseModel.wordRequires;
+    if (!perWord || !perWord.length) return activePhaseModel.requires;
+    return perWord[currentWordIndex()] || activePhaseModel.requires;
 }
 
 function isWordDone(i) {
@@ -1298,31 +1364,25 @@ function renderGlossStrip() {
 function analyzeSentenceFeedback(results) {
     const user = smoothUserFrame(extractFrameFeatures(results));
 
-    // Sentence already complete (every phase of the combined model reached):
-    // stay frozen on the summary until the learner actually starts the FIRST
-    // sign again (checked directly here, since a normal scoring pass never
-    // runs while frozen). Clearing on every frame right after finishing (this
-    // function's previous behavior) reset far too eagerly - the very next
-    // frame, still showing whatever pose the learner happened to be in right
-    // after completing the LAST sign, would immediately start scoring a new
-    // attempt against phase 0 and stomp the "Sentence complete!" display
-    // almost instantly. Gating the reset on an actual phase-0 match means it
-    // only fires when the learner deliberately goes back to the start.
-    if (phaseReached.length && phaseReached.every(Boolean)) {
-        const firstHold = activePhaseModel.holds[0];
-        const startingOver = firstHold && matchHold(user, firstHold).q >= HOLD_COMPLETE_Q;
-        if (!startingOver) return;
-        prevUserSmoothed = null;
-        resetPhaseProgress();
-        renderGlossStrip();
-    }
-
     if (!activePhaseModel || activePhaseModel.holds.length === 0) {
         document.getElementById("coach-feedback-status").textContent = "Loading word...";
         return;
     }
 
-    const need = activePhaseModel.requires;
+    // Lowering both hands is the one and only thing that restarts a sentence,
+    // finished or not, and it restarts it from word 1. The old rule - wipe the
+    // board as soon as a completed sentence saw a pose resembling word 1's
+    // first checkpoint - fired without warning and was the only path by which a
+    // sentence score could fall to 0.
+    if (clearAttemptIfHandsAway(user)) return;
+
+    // A finished sentence holds its score on screen until the hands come down.
+    if (attemptComplete) return;
+
+    // Per-word limb requirement, not the sentence-wide maximum: a one-handed
+    // word is satisfied by one hand even when a later word in the same sentence
+    // needs two.
+    const need = currentWordRequires();
     const limbMsg = requiredLimbsMissing(user, need);
     if (limbMsg) {
         missingLimbFrames++;
@@ -1338,6 +1398,10 @@ function analyzeSentenceFeedback(results) {
     const result = scoreActiveModel(user);
     lastDisplayScore = result.displayScore;
     const curIdx = currentWordIndex();
+
+    // Freeze the finished score in place; clearAttemptIfHandsAway above is what
+    // releases it.
+    if (result.allPhasesReached) attemptComplete = true;
 
     // Classification pass: does the learner look more like a DIFFERENT gloss
     // word than the one currently expected? Nearest-neighbor over each
@@ -1382,9 +1446,7 @@ function analyzeSentenceFeedback(results) {
 
     if (result.allPhasesReached) {
         finishSentenceSession(result.displayScore);
-        // No reset here - see the top of this function. The per-attempt state
-        // clears when the learner actually starts the first sign again, not
-        // the instant the last one completes.
+        // No reset here - lowering both hands is what starts the next attempt.
     }
 }
 
@@ -1403,9 +1465,21 @@ function updateSentenceDebug(result, bestWord, bestQ, curIdx) {
     if (!coachDebug) return;
     const el = document.getElementById("coach-debug");
     if (!el) return;
+    // Per-word contributions, so an even split is visible as such: each word
+    // shows what fraction of its OWN checkpoints it has banked and at what
+    // quality, and every one of them is worth the same share of the total.
+    const perWord = (sentenceCombinedModel ? sentenceCombinedModel.wordPhaseRanges : []).map(([start, end], i) => {
+        if (end <= start) return `${sentenceGloss[i]}:n/a`;
+        let banked = 0, sum = 0;
+        for (let p = start; p < end; p++) {
+            if (phaseReached[p]) { banked++; sum += phaseBest[p]; }
+        }
+        return `${sentenceGloss[i]} ${banked}/${end - start}@${Math.round((sum / (end - start)) * 100)}%`;
+    }).join("  ");
     el.textContent =
         `word ${curIdx + 1}/${sentenceGloss.length} "${sentenceGloss[curIdx]}" | phase ${curPhase + 1}/${result.P} | ` +
-        `score ${result.displayScore}% | classifier top match: ${bestWord} (${Math.round(bestQ * 100)}%)`;
+        `score ${result.displayScore}% | ${perWord} | ` +
+        `classifier top match: ${bestWord} (${Math.round(bestQ * 100)}%)`;
 }
 
 // Match of a user frame to a hold target pose, considering BOTH orientations so

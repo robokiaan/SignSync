@@ -318,15 +318,7 @@ function activatePhaseModel(signName) {
     // so a 5s sign isn't held to a 1.6s sign's pace. Read it off the loaded
     // reference video; if it isn't known the penalty simply never fires.
     if (activePhaseModel) {
-        // requiredLimbs only counts a hand as "used" if it was tracked in at
-        // least half the reference frames, so a clip where tracking struggled
-        // can come back asking for ZERO hands - and then the "show your hands"
-        // prompt never fires and the score can be earned with nothing on
-        // camera. No sign is performed with no hands, so floor it at one.
-        // Applied on load rather than at build time so it needs no rebuild.
-        if (activePhaseModel.requires && !activePhaseModel.requires.hands) {
-            activePhaseModel.requires = { ...activePhaseModel.requires, hands: 1 };
-        }
+        activePhaseModel.requires = gradedLimbs(activePhaseModel);
     }
     resetPhaseProgress();
 }
@@ -774,6 +766,30 @@ function errorBreakdown(userFrame, refFrame) {
 //
 // Height comes from the pose landmarks, so it is known whether or not the hand
 // model kept its lock.
+// What the sign actually needs on camera, derived from its checkpoints rather
+// than read from the stored `requires` field.
+//
+// The stored value comes from requiredLimbs at build time, which counts a hand
+// as used only if the tracker saw it in at least half the reference frames. On
+// a clip where tracking struggled that returns fewer hands than the checkpoints
+// are graded on - "doctor" stores 0 while both of its hands are compared - and
+// then the prompt never fires and the learner just watches the score sit near
+// zero with no explanation. 62 of 261 signs disagreed this way.
+//
+// Deriving it from refHandRequired ties the prompt to exactly what is graded.
+// Floored at one hand: a handful of signs grade no handshape at all (see
+// check_phase_health.py), and "no hands needed" would let the score be earned
+// with nothing on camera.
+function gradedLimbs(model) {
+    let hands = 0;
+    for (const hold of model.holds || []) {
+        const n = (refHandRequired(hold, "right") ? 1 : 0) + (refHandRequired(hold, "left") ? 1 : 0);
+        if (n > hands) hands = n;
+    }
+    const pose = model.requires ? model.requires.pose : true;
+    return { hands: Math.max(1, hands), pose };
+}
+
 function refHandRequired(refFrame, side) {
     const tracked = side === "right" ? refFrame.visibility.rightHand : refFrame.visibility.leftHand;
     if (!tracked) return false;   // reference has no handshape here - nothing to compare against
@@ -1101,11 +1117,12 @@ function buildCombinedPhaseModel(words) {
             poseNeeded = poseNeeded || model.requires.pose;
         }
         wordPhaseRanges.push([start, holds.length]);
-        // Each word keeps its OWN limb requirement. The max across the sentence
-        // (still computed above, for anything wanting a whole-sentence answer)
-        // is the wrong thing to prompt on: one two-handed word in the sentence
-        // made the coach demand two hands for every one-handed word in it too.
-        wordRequires.push(model && model.requires ? model.requires : { hands: 1, pose: true });
+        // Each word keeps its OWN limb requirement, derived the same way single
+        // -sign practice derives it. The max across the sentence (still computed
+        // above, for anything wanting a whole-sentence answer) is the wrong
+        // thing to prompt on: one two-handed word in the sentence made the coach
+        // demand two hands for every one-handed word in it too.
+        wordRequires.push(model && model.holds ? gradedLimbs(model) : { hands: 1, pose: true });
     }
 
     return {

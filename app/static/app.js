@@ -312,11 +312,12 @@ async function loadDictionary() {
             return;
         }
 
-        // Alphabetical by default so a known word stays findable; sorting by
-        // difficulty is opt-in, and keeps alphabetical order within each tier
-        // rather than leaving equal-difficulty signs in arbitrary order.
+        // Easiest first by default, matching the dashboard: a learner browsing
+        // the dictionary should meet one-pose signs before five-pose ones.
+        // Alphabetical is the tiebreak within a tier, and stays available as an
+        // explicit "A to Z" choice for looking up a word you already know.
         const sortEl = document.getElementById("dict-sort-select");
-        const sortBy = sortEl ? sortEl.value : "";
+        const sortBy = sortEl ? sortEl.value : "easiest";
         const signs = filtered.slice();
         if (sortBy === "easiest" || sortBy === "hardest") {
             const rank = (s) => {

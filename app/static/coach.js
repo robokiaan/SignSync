@@ -87,12 +87,18 @@ const HAND_ACTIVE_Y = 0.85;
 // never mistaken for a deliberate "I'm done".
 const HANDS_AWAY_RESET_MS = 500;
 
-// Time penalty: each transition between checkpoints gets 3x the reference clip's
-// own duration, and every completed budget multiplies the WHOLE attempt score by
-// TIME_PENALTY_STEP, compounding, down to TIME_PENALTY_FLOOR. Budgets work out at
-// 4.9s (shortest clip) to 15.6s (longest), so copying the reference at its own
-// tempo never crosses a boundary at all.
-const TIME_BUDGET_CLIP_MULTIPLE = 3;
+// Time penalty: every transition between consecutive checkpoints gets the same
+// flat TRANSITION_BUDGET_MS, and each completed budget multiplies the WHOLE
+// attempt score by TIME_PENALTY_STEP, compounding, down to TIME_PENALTY_FLOOR.
+// So a 5s transition is free, 5-10s costs x0.9, 10-15s x0.81, and so on for the
+// rest of the attempt.
+//
+// Flat rather than a multiple of the reference clip's length, which is what it
+// used to be: a sentence has no single clip to scale against - the reference
+// video cycles one word at a time - so the whole sentence ended up budgeted
+// against whichever word happened to be loaded. One number covers signs and
+// sentences alike, and it is the same number the learner experiences either way.
+const TRANSITION_BUDGET_MS = 5000;
 const TIME_PENALTY_STEP = 0.9;
 const TIME_PENALTY_FLOOR = 0.5;
 
@@ -298,9 +304,6 @@ function activatePhaseModel(signName) {
         if (activePhaseModel.requires && !activePhaseModel.requires.hands) {
             activePhaseModel.requires = { ...activePhaseModel.requires, hands: 1 };
         }
-        const refVideo = document.getElementById("practice-ref-video");
-        const d = refVideo && refVideo.duration;
-        activePhaseModel.clipDuration = (isFinite(d) && d > 0) ? d : (activePhaseModel.clipDuration || 0);
     }
     resetPhaseProgress();
 }
@@ -845,8 +848,7 @@ function scoreActiveModel(user) {
 
     // Taking too long multiplies the whole attempt, compounding per overrun
     // budget. Evaluated live so the number reflects the delay as it happens
-    // rather than arriving as a surprise at the end. Sentences are untimed, so
-    // this is 1 there (see buildCombinedPhaseModel).
+    // rather than arriving as a surprise at the end.
     const timePenalty = currentTimePenalty();
     const displayScore = Math.min(100, Math.round(aggregatePhaseScore(P) * timePenalty * 100));
 
@@ -898,34 +900,19 @@ function aggregatePhaseScore(P) {
 }
 
 // --- Time penalty -----------------------------------------------------------
-// Each transition between consecutive checkpoints gets a budget of
-// TIME_BUDGET_CLIP_MULTIPLE x the reference clip's own length. Every completed
-// budget is one "crossing", crossings accumulate across the attempt, and the
-// whole score is multiplied by TIME_PENALTY_STEP per crossing down to
-// TIME_PENALTY_FLOOR. Time before the first checkpoint is free, so
-// single-checkpoint signs carry no penalty at all.
-function transitionBudgetMs() {
-    if (!activePhaseModel) return Infinity;
-    // Checked BEFORE the lazy resolve below, which would otherwise read a
-    // duration off the shared reference <video> that has nothing to do with
-    // this model. See buildCombinedPhaseModel.
-    if (activePhaseModel.untimed) return Infinity;
-    // Duration often isn't known yet when the model is activated (metadata still
-    // loading), so resolve it lazily and cache.
-    if (!activePhaseModel.clipDuration) {
-        const refVideo = document.getElementById("practice-ref-video");
-        const d = refVideo && refVideo.duration;
-        if (isFinite(d) && d > 0) activePhaseModel.clipDuration = d;
-    }
-    const clip = activePhaseModel.clipDuration || 0;
-    if (!clip) return Infinity; // unknown clip length => never penalise
-    return TIME_BUDGET_CLIP_MULTIPLE * clip * 1000;
-}
-
+// Every transition between consecutive checkpoints gets the same flat
+// TRANSITION_BUDGET_MS. Each completed budget is one "crossing", crossings
+// accumulate across the attempt, and the whole score is multiplied by
+// TIME_PENALTY_STEP per crossing down to TIME_PENALTY_FLOOR. Time before the
+// FIRST checkpoint is free - lining yourself up is not signing - so a
+// single-checkpoint sign carries no penalty at all.
+//
+// Identical for a sentence, where the gap between two words is just another
+// transition: the combined model's checkpoints run continuously across word
+// boundaries, so nothing here has to know where one word ends.
 function crossingsFor(elapsedMs) {
-    const budget = transitionBudgetMs();
-    if (!isFinite(budget) || budget <= 0 || !isFinite(elapsedMs) || elapsedMs <= 0) return 0;
-    return Math.floor(elapsedMs / budget);
+    if (!isFinite(elapsedMs) || elapsedMs <= 0) return 0;
+    return Math.floor(elapsedMs / TRANSITION_BUDGET_MS);
 }
 
 // Banked crossings, plus the transition currently in progress so the score ticks
@@ -1097,14 +1084,6 @@ function buildCombinedPhaseModel(words) {
         holds, moveDirs, holdTimes,
         requires: { hands: handsMax, pose: poseNeeded },
         wordPhaseRanges, wordRequires,
-        // A sentence has no single reference clip to budget time against: the
-        // shared #practice-ref-video cycles one word's clip at a time, so
-        // transitionBudgetMs' lazy resolve picked up whichever word was playing
-        // (in practice the first) and applied 3x ITS length to every transition
-        // in the sentence, pause between words included. That made the score
-        // fall as the learner moved from word to word. Sentences are untimed
-        // until there is a per-transition budget from the owning word.
-        untimed: true,
     };
 }
 
@@ -1478,7 +1457,7 @@ function updateSentenceDebug(result, bestWord, bestQ, curIdx) {
     }).join("  ");
     el.textContent =
         `word ${curIdx + 1}/${sentenceGloss.length} "${sentenceGloss[curIdx]}" | phase ${curPhase + 1}/${result.P} | ` +
-        `score ${result.displayScore}% | ${perWord} | ` +
+        `score ${result.displayScore}% | time x${result.timePenalty.toFixed(2)} | ${perWord} | ` +
         `classifier top match: ${bestWord} (${Math.round(bestQ * 100)}%)`;
 }
 

@@ -244,8 +244,21 @@ async function loadLessons() {
             const lessonCard = document.createElement("div");
             lessonCard.className = "lesson-card glass";
 
+            // Within a lesson, signs run easiest to hardest so a learner works
+            // up through a category instead of hitting a 5-pose sign first
+            // because its name starts with A. Alphabetical is the tiebreak
+            // inside a tier, and a sign with no phase model sorts last rather
+            // than being treated as 0 poses. slice() because siteData.lessons
+            // is the cached copy every later render reads from.
+            const items = lesson.items.slice().sort((a, b) => {
+                const ra = difficultyFor(a.sign.sign_name)?.holds ?? Infinity;
+                const rb = difficultyFor(b.sign.sign_name)?.holds ?? Infinity;
+                if (ra !== rb) return ra - rb;
+                return a.sign.sign_name.localeCompare(b.sign.sign_name);
+            });
+
             let itemsListHtml = '<div style="display:flex; flex-wrap:wrap; gap: 0.5rem; margin-top: 0.75rem;">';
-            lesson.items.forEach((item) => {
+            items.forEach((item) => {
                 // Same pose-count difficulty the dictionary shows, condensed to
                 // fit a button: a coloured left edge plus the pose count. The
                 // full wording lives in the tooltip.

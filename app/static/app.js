@@ -225,7 +225,10 @@ function showAlert(message, type = "success") {
 // Load Lessons in Dashboard
 async function loadLessons() {
     try {
-        await loadSiteData();
+        // Difficulty loads alongside the lessons so each sign button can carry
+        // its own pose count - the lesson-level tag below is category-derived
+        // and says nothing about how hard the individual signs in it are.
+        await Promise.all([loadSiteData(), loadDifficulty()]);
         // siteData.lessons already arrives in the intended display order
         // (scripts/build_static_data.py's CATEGORY_RELEVANCE_ORDER) - no
         // client-side re-sort. A difficulty-tier sort used to run here, but
@@ -243,9 +246,19 @@ async function loadLessons() {
 
             let itemsListHtml = '<div style="display:flex; flex-wrap:wrap; gap: 0.5rem; margin-top: 0.75rem;">';
             lesson.items.forEach((item) => {
+                // Same pose-count difficulty the dictionary shows, condensed to
+                // fit a button: a coloured left edge plus the pose count. The
+                // full wording lives in the tooltip.
+                const diff = difficultyFor(item.sign.sign_name);
+                const pip = diff
+                    ? `<span class="pose-pip">${diff.holds}</span>`
+                    : "";
+                const title = diff
+                    ? `${diff.label} - ${diff.holds} pose${diff.holds > 1 ? "s" : ""} to match`
+                    : "Difficulty unknown";
                 itemsListHtml += `
-                    <button class="btn btn-secondary" onclick="startPractice('${item.sign.sign_name}', '${lesson.title}')" style="width:auto; padding:0.4rem 0.8rem; font-size:0.85rem; text-transform:capitalize;">
-                        🎬 ${item.sign.sign_name}
+                    <button class="btn btn-secondary sign-chip${diff ? ` diff-${diff.key}` : ""}" title="${title}" onclick="startPractice('${item.sign.sign_name}', '${lesson.title}')" style="width:auto; padding:0.4rem 0.8rem; font-size:0.85rem; text-transform:capitalize;">
+                        🎬 ${item.sign.sign_name}${pip}
                     </button>
                 `;
             });

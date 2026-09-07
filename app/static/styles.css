@@ -827,6 +827,51 @@ select option {
 .dict-card.diff-hard   { border-top-color: rgba(245, 158, 11, 0.7); }
 .dict-card.diff-expert { border-top-color: rgba(239, 68, 68, 0.85); }
 
+/* Dashboard sign buttons carry the same difficulty, condensed: a coloured
+   left edge and the pose count, since a full "Expert - 5 poses" badge would
+   not fit a chip that already holds the sign name. */
+.sign-chip {
+    border-left-width: 3px;
+    border-left-style: solid;
+    border-left-color: var(--border-color);
+}
+
+.sign-chip.diff-easy   { border-left-color: rgba(16, 185, 129, 0.55); }
+.sign-chip.diff-medium { border-left-color: rgba(6, 182, 212, 0.65); }
+.sign-chip.diff-hard   { border-left-color: rgba(245, 158, 11, 0.8); }
+.sign-chip.diff-expert { border-left-color: rgba(239, 68, 68, 0.95); }
+
+.pose-pip {
+    display: inline-block;
+    margin-left: 0.4rem;
+    min-width: 1.05rem;
+    padding: 0 0.25rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1.35;
+    text-align: center;
+}
+
+.sign-chip.diff-easy   .pose-pip { background: rgba(16, 185, 129, 0.15); color: var(--success); }
+.sign-chip.diff-medium .pose-pip { background: rgba(6, 182, 212, 0.15); color: var(--secondary); }
+.sign-chip.diff-hard   .pose-pip { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
+.sign-chip.diff-expert .pose-pip { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+
+/* Legend above the curriculum, so the bare pose-count numbers on the chips
+   mean something without hovering each one. */
+.difficulty-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: -0.25rem 0 1rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.difficulty-legend .tag { text-transform: none; }
+
 .dict-card .tag-list {
     justify-content: center;
     flex-wrap: wrap;

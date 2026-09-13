@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SignSync ISL - Learn Indian Sign Language with AI</title>
-    <link rel="stylesheet" href="/styles.css?v=58">
+    <link rel="stylesheet" href="/styles.css?v=60">
 
     <!-- GitHub Pages has no server-side rewrites, so a direct hit on a client
     route (e.g. /dashboard/alright) 404s and lands on 404.html, which redirects
@@ -125,23 +125,29 @@
         <div id="page-sentences" class="page">
             <div style="margin-bottom: 2rem;">
                 <h1 style="font-size: 2rem; margin-bottom: 0.5rem;">Sentence Practice</h1>
-                <p style="color: var(--text-secondary);">Sign full sentences in the correct ISL gloss order — the coach checks each word as you go, in sequence.</p>
+                <p style="color: var(--text-secondary);">Sign full sentences in ISL grammar order — the coach checks each word as you go, in sequence. New to ISL word order? Open the grammar guide below.</p>
             </div>
 
-            <!-- Type your own sentence: matched against the dictionary's own words, in the
-                 order you type them (not a translator - see the words found before practicing). -->
+            <!-- Type your own sentence. Every word that has to be signed must have a
+                 sign in the dictionary, or practice is refused and the missing words are
+                 named - the coach can only grade what it has a reference for. Matched
+                 words are then put into ISL order (islOrder) before practice starts. -->
             <div class="glass" style="padding: 1.5rem; margin-bottom: 2rem;">
                 <div class="form-group" style="margin-bottom: 1rem;">
-                    <label for="custom-sentence-input">Type a sentence to practice</label>
-                    <input type="text" id="custom-sentence-input" class="form-input" placeholder="e.g. The dog is big and brown." onkeydown="if(event.key==='Enter') practiceCustomSentence();">
+                    <label for="custom-sentence-input">Write your own sentence</label>
+                    <input type="text" id="custom-sentence-input" class="form-input" placeholder="e.g. The dog is big and brown." oninput="clearCustomSentenceWarning()" onkeydown="if(event.key==='Enter') practiceCustomSentence();">
+                    <div id="custom-sentence-warning" role="alert" style="display:none; margin-top:0.6rem; color:#f87171; font-size:0.9rem;"></div>
                 </div>
-                <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
-                    <button class="btn btn-secondary" style="width:auto; padding:0.7rem 1.25rem;" onclick="generateCustomSentence()">🎲 Auto-generate</button>
+                <div style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:center;">
                     <button class="btn btn-primary" style="width:auto; padding:0.7rem 1.5rem;" onclick="practiceCustomSentence()">▶ Practice</button>
+                    <span style="color: var(--text-secondary); font-size:0.85rem;">Your sentence is turned into ISL gloss first; every sign in it must exist in the Dictionary.</span>
                 </div>
             </div>
 
-            <h2 class="lessons-section-header" style="font-size:1.2rem;">Or choose a sentence</h2>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; margin-bottom:1rem;">
+                <h2 class="lessons-section-header" style="font-size:1.2rem; margin:0;">Or choose one of the few practice sentences</h2>
+                <button class="btn btn-secondary" style="width:auto; padding:0.6rem 1.1rem;" onclick="openGrammarGuide()">📖 Learn ISL grammar</button>
+            </div>
             <div class="lessons-list" id="sentences-list-container">
                 <!-- Sentences populated dynamically -->
             </div>
@@ -248,52 +254,101 @@
                         </div>
                     </div>
 
-                    <div class="coach-divider" style="width: 1px; height: 50px; background: var(--border-color);"></div>
-
-                    <div style="display: flex; gap: 0.5rem;">
-                        <!-- Single-sign practice only (sentence mode redoes automatically
-                             when you go back to the first word - see resumeCombinedModel). -->
-                        <button class="btn btn-secondary" id="btn-reset-attempt" onclick="resetSignAttempt()" style="display: none; width: auto; padding: 0.85rem 1.5rem;">
-                            Reset
-                        </button>
-                        <button class="btn btn-primary" id="btn-complete-sign" onclick="finishSession()" style="width: auto; padding: 0.85rem 2rem;">
-                            Finish Session
-                        </button>
-                    </div>
+                    <!-- Single-sign practice only (sentence mode redoes automatically
+                         when you go back to the first word - see resumeCombinedModel). -->
+                    <button class="btn btn-secondary" id="btn-reset-attempt" onclick="resetSignAttempt()" style="display: none; width: auto; padding: 0.85rem 1.5rem;">
+                        Reset
+                    </button>
 
                 </div>
                 <p class="coach-disclaimer">Checks key positions in the sign, not your whole movement &mdash; use the reference video as your guide.</p>
-            </div>
-
-            <!-- Live scoring breakdown (for calibration; toggle with the checkbox) -->
-            <div style="display:flex; align-items:center; gap:0.75rem; margin-top:0.75rem;">
-                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; font-size:0.8rem; color:var(--text-secondary); user-select:none;">
-                    <input type="checkbox" id="toggle-coach-debug" checked onchange="setCoachDebug(this.checked)" style="cursor:pointer;">
-                    🐞 Debug
-                </label>
-                <div id="coach-debug" style="flex:1; font-family:monospace; font-size:0.75rem; color:var(--text-secondary); background:rgba(0,0,0,0.25); border:1px solid var(--border-color); border-radius:6px; padding:0.4rem 0.6rem; overflow-x:auto; white-space:pre-wrap; line-height:1.5;">
-                    Start the camera and perform the sign — the live score breakdown will appear here.
-                </div>
-            </div>
-
-            <!-- [TEMP] Inspect the auto-detected phase (hold) frames for this sign -->
-            <div style="margin-top:0.75rem;">
-                <button class="btn btn-secondary" onclick="showPhaseFrames()" style="width:auto; padding:0.4rem 0.9rem; font-size:0.85rem;">
-                    🎞 Show Phase Frames
-                </button>
-                <div id="phase-frames" style="display:none; flex-wrap:wrap; gap:0.75rem; margin-top:0.75rem; align-items:flex-start;"></div>
             </div>
 
         </div>
 
     </main>
 
+    <!-- ISL grammar guide: every gloss rule the sentence practice follows -->
+    <div id="grammar-modal" class="modal-backdrop" style="display:none;" onclick="if (event.target === this) closeGrammarGuide()">
+        <div class="modal glass" role="dialog" aria-modal="true" aria-labelledby="grammar-title">
+            <div class="modal-header">
+                <h2 id="grammar-title">ISL Grammar &amp; Gloss Rules</h2>
+                <button class="modal-close" onclick="closeGrammarGuide()" aria-label="Close">✕</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-intro">Indian Sign Language is its own language, not signed English. A <strong>gloss</strong> is the written shorthand for a signed sentence: one CAPITALISED English label per sign, in the order the signs are made. Every sentence in this app is written and graded by these rules.</p>
+
+                <h3>1. Word order: time, then subject, then object, then verb (SOV)</h3>
+                <ul>
+                    <li>Time first: <code>TOMORROW WE SCHOOL GO</code>, not "we go to school tomorrow".</li>
+                    <li>Then the subject, then the object or place, and the verb last: <code>I BOOK READ</code>, <code>SHE MARKET GO</code>.</li>
+                    <li>ISL is topic-comment: name what you are talking about first, then say something about it. <code>CAR RED EXPENSIVE</code> = the red car is expensive.</li>
+                    <li>A place can open the sentence as the topic: <code>TRAIN-STATION CROWD BIG</code>.</li>
+                </ul>
+
+                <h3>2. Words that are dropped</h3>
+                <ul>
+                    <li>No "is / am / are / was / were": <code>HE TALL</code>, <code>SHE DOCTOR</code>.</li>
+                    <li>No articles "a / an / the": <code>DOG BIG</code>.</li>
+                    <li>No "to / at / in / of" as separate signs; the relationship is shown by where the signs are placed in space: <code>TEACHER SCHOOL GOOD</code>.</li>
+                    <li>No "and" between describing words; sign them one after the other: <code>WINTER COLD WHITE</code>.</li>
+                    <li>No possessive 's; the owner comes first: <code>STUDENT BOOK NEW</code>.</li>
+                </ul>
+
+                <h3>3. Describing words come after the noun</h3>
+                <ul>
+                    <li>Adjectives and colours follow what they describe: <code>CAT BLACK</code>, <code>CAR RED EXPENSIVE</code>.</li>
+                    <li>Several describing words simply follow in a row: <code>GRANDFATHER OLD STRONG HEALTHY</code>.</li>
+                    <li>Numbers and amounts also come after the noun: <code>BOOK THREE</code>.</li>
+                    <li>Intensity ("very", "really") is shown by signing bigger and slower with a stronger facial expression, not by an extra word.</li>
+                </ul>
+
+                <h3>4. Questions and negation go at the end</h3>
+                <ul>
+                    <li>Question words (WHAT, WHERE, WHO, WHEN, WHY, HOW) close the sentence: <code>YOU NAME WHAT</code>, <code>SCHOOL WHERE</code>, with furrowed eyebrows.</li>
+                    <li>Yes/no questions keep normal order and are marked by raised eyebrows and a forward lean: <code>YOU DOCTOR</code> + raised brows = are you a doctor?</li>
+                    <li>Negation comes last with a headshake: <code>I HAPPY NOT</code>, <code>DOG BIG NOT</code>.</li>
+                </ul>
+
+                <h3>5. Time and tense</h3>
+                <ul>
+                    <li>Verbs never change form. Tense is set once by a time sign at the start: <code>YESTERDAY I MARKET GO</code>, <code>TOMORROW I MARKET GO</code>.</li>
+                    <li>Once the time is set it holds for the whole sentence (and the following ones) until a new time sign changes it.</li>
+                    <li>Time signs use a timeline: behind the body for past (YESTERDAY, BEFORE), at the body for present (NOW, TODAY), in front for future (TOMORROW, LATER).</li>
+                </ul>
+
+                <h3>6. Pronouns, plurals and space</h3>
+                <ul>
+                    <li>Pronouns are pointing: point to yourself for I, to the person for YOU, to a set spot for HE / SHE / IT.</li>
+                    <li>A sweep of the point makes it plural: WE, YOU (plural), THEY.</li>
+                    <li>Plurals of nouns are made by repeating the sign or adding a number, never by an "s".</li>
+                    <li>People and places are set up at spots in the signing space, then referred back to by pointing at that spot instead of repeating the sign.</li>
+                </ul>
+
+                <h3>7. The face is part of the grammar</h3>
+                <ul>
+                    <li>Raised eyebrows = yes/no question or topic; furrowed eyebrows = wh-question; headshake = negation; nod = affirmation.</li>
+                    <li>Mouth and cheeks show degree: puffed cheeks for BIG, pursed lips for SMALL or THIN.</li>
+                    <li>A gloss written without these markers is incomplete; the coach grades the hands, but the face is what makes it a sentence.</li>
+                </ul>
+
+                <h3>8. What this app can grade</h3>
+                <ul>
+                    <li>The INCLUDE dictionary used here has nouns, pronouns, adjectives, colours and time words, but no verb signs. Sentences are therefore written without the verb slot: <code>TOMORROW WE SCHOOL</code> stands for TOMORROW WE SCHOOL GO.</li>
+                    <li>Every curated sentence's English uses only words that have a sign, so the gloss is exactly the English content words, reordered by rules 1 to 3.</li>
+                    <li>A sentence you write yourself is first turned into its gloss by these rules (small words dropped, NOT and question words moved to the end, verbs last) and only then checked: every sign in that gloss must exist in the dictionary, or the coach shows you the gloss and names the signs it cannot grade. "I don't have food" becomes I FOOD HAVE NOT, and none of those four has a sign here.</li>
+                    <li>The coach checks the hand poses of each word in order. Facial grammar (rule 7) is not tracked; practise it anyway.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
     <!-- Global Alert Popup -->
     <div id="global-alert" class="alert-popup">Alert text</div>
 
     <!-- Application scripts -->
-    <script src="/gloss_matching.js?v=1"></script>
-    <script src="/app.js?v=67"></script>
-    <script src="/coach.js?v=86"></script>
+    <script src="/gloss_matching.js?v=5"></script>
+    <script src="/app.js?v=73"></script>
+    <script src="/coach.js?v=87"></script>
 </body>
 </html>

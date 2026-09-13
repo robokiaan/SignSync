@@ -56,15 +56,3 @@ class SentenceResponse(BaseModel):
         from_attributes = True
 
 
-class ParseSentenceRequest(BaseModel):
-    text: str
-
-
-class ParseSentenceResponse(BaseModel):
-    gloss: List[str]
-    unmatched: List[str]
-
-
-class GenerateSentenceResponse(BaseModel):
-    english: str
-    gloss: List[str]

@@ -17,6 +17,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.seed import CATEGORIES_MAP, BEGINNER_CATEGORIES, get_category_for_sign, slugify_gloss
+from app.gloss_matching import build_alias_index, to_gloss
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(ROOT, "app", "static", "data")
@@ -81,6 +82,8 @@ def build_lessons(signs):
 
 def build_sentences(signs):
     by_name = {s["sign_name"]: s for s in signs}
+    alias_index = build_alias_index(by_name)
+    category_by_name = {s["sign_name"]: s["category"] for s in signs}
     manifest_path = os.path.join(ROOT, "app", "sentences.json")
     with open(manifest_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
@@ -99,6 +102,23 @@ def build_sentences(signs):
             gloss_signs.append(sign)
         if not gloss_signs:
             continue
+
+        # Every curated sentence's English must gloss (to_gloss - the same
+        # rules the write-your-own flow runs in the browser) to exactly the
+        # stored gloss, with no sign missing - so what the learner reads in
+        # English is what they are graded on, word for word. Fail the build
+        # rather than ship a mismatch.
+        names = [s["sign_name"] for s in gloss_signs]
+        glossed, missing = to_gloss(entry["english"], alias_index, category_by_name)
+        if missing:
+            raise SystemExit(
+                f"sentence '{entry['english']}' needs signs the dictionary lacks: {missing}"
+            )
+        expected = [t["label"] for t in glossed]
+        if names != expected:
+            raise SystemExit(
+                f"sentence '{entry['english']}' gloss {names} does not match its English glossed; expected {expected}"
+            )
 
         base_slug = slugify_gloss(s["sign_name"] for s in gloss_signs)
         slug, n = base_slug, 2

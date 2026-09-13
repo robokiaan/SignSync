@@ -130,7 +130,6 @@ let activePhaseModel = null;   // { holds, moveDirs, holdTimes, requires }
 let phaseBest = [];            // best hold quality achieved per phase this attempt
 let phaseReached = [];         // has each phase been hit at least at HOLD_COMPLETE_Q?
 let phaseUserPose = [];        // user feature vector captured when each phase was reached
-let phaseErrorBreakdown = [];  // TEMP diagnostic: per-pose error split at its best frame
 let curPhase = 0;              // phase the learner is currently working toward
 let phaseEnteredAt = 0;        // performance.now() when curPhase last changed - see PHASE_TRANSITION_DELAY_MS
 let attemptComplete = false;   // final checkpoint banked; waiting for hands to leave before re-arming
@@ -160,17 +159,10 @@ let lastMisclassifiedWord = null;   // that word, for the "looks like X" feedbac
 let sentenceViewMode = "all";       // sentence-mode view selector; "all" is the default and only mode today
 let videoChainIdx = 0;              // index into sentenceGloss for the combined reference-video playback ("all" mode)
 
-let coachDebug = true;         // show the live scoring breakdown panel
-
 let canvasElement, canvasCtx;
 
 // Reference sequence buffers + caches
 let refSequence = [];
-// Raw-landmark capture for the 3D avatar pipeline (offline extraction only -
-// see scripts/extract_avatar_landmarks.py). Gated behind window.CAPTURE_RAW_LANDMARKS
-// (default off) so this is a no-op, zero-behavior-change addition to the live
-// coaching path. Populated alongside refSequence during 'ref' priming.
-let rawRefSequence = [];
 const refCache = {};           // signName -> reference feature sequence (in-memory)
 const phaseCache = {};         // signName -> phase model
 let holisticMode = "idle";     // 'idle' | 'ref' | 'user'
@@ -229,14 +221,6 @@ function ensureHolisticModel() {
 function onHolisticResults(results) {
     if (holisticMode === "ref") {
         refSequence.push(extractFrameFeatures(results));
-        if (window.CAPTURE_RAW_LANDMARKS) {
-            rawRefSequence.push({
-                pose: results.poseLandmarks || null,
-                poseWorld: findWorldLandmarks(results),
-                leftHand: results.leftHandLandmarks || null,
-                rightHand: results.rightHandLandmarks || null,
-            });
-        }
         return;
     }
     if (holisticMode !== "user" || !isWebcamActive || !canvasElement || !canvasCtx) return;
@@ -278,7 +262,7 @@ async function primeReference(signName) {
     }
 
     const video = document.getElementById("practice-ref-video");
-    if (!video) { refSequence = []; rawRefSequence = []; return; }
+    if (!video) { refSequence = []; return; }
 
     ensureHolisticModel();
     await waitForVideoReady(video);
@@ -286,7 +270,6 @@ async function primeReference(signName) {
 
     document.getElementById("coach-feedback-status").textContent = "Analyzing reference...";
     refSequence = [];
-    rawRefSequence = [];
     const previousMode = holisticMode;
     holisticMode = "ref";
     try {
@@ -328,7 +311,6 @@ function resetPhaseProgress() {
     phaseBest = new Array(P).fill(0);
     phaseReached = new Array(P).fill(false);
     phaseUserPose = new Array(P).fill(null);
-    phaseErrorBreakdown = new Array(P).fill(null);
     curPhase = 0;
     phaseEnteredAt = performance.now();
     attemptComplete = false;
@@ -653,7 +635,6 @@ function clamp01(v) {
 
 function resetDTWSequences() {
     refSequence = [];
-    rawRefSequence = [];
     activePhaseModel = null;
     prevUserSmoothed = null;
     resetPhaseProgress();
@@ -708,50 +689,6 @@ function getMaskedVectorDistance(userFrame, refFrame) {
     }
 
     return Math.sqrt(sum / FEATURE_WEIGHT_TOTAL);
-}
-
-// TEMP diagnostic: where is the residual error coming from? Splits the same
-// weighted squared error getMaskedVectorDistance sums into the six things a
-// pose is made of, so a learner performing correctly can see whether their
-// remaining gap is handshape (real signal) or palm angle / hand position
-// (which shift with camera placement and body proportions, and are already
-// down-weighted for that reason). Delete once the weights are settled.
-const ERROR_GROUPS = [
-    { label: "R fingers", start: 0, end: 5, needRight: true },
-    { label: "R palm angle", start: 5, end: 8, needRight: true },
-    { label: "R finger spread", start: 8, end: 9, needRight: true },
-    { label: "L fingers", start: 9, end: 14, needLeft: true },
-    { label: "L palm angle", start: 14, end: 17, needLeft: true },
-    { label: "L finger spread", start: 17, end: 18, needLeft: true },
-    { label: "elbows", start: 18, end: 20, needPose: true },
-    { label: "shoulders", start: 20, end: 22, needPose: true },
-    { label: "R hand position", start: 22, end: 24, needPose: true },
-    { label: "L hand position", start: 24, end: 26, needPose: true },
-];
-
-function errorBreakdown(userFrame, refFrame) {
-    const uVis = userFrame.visibility, rVis = refFrame.visibility;
-    const uf = userFrame.features, rf = refFrame.features;
-    const rows = [];
-    let total = 0;
-    for (const g of ERROR_GROUPS) {
-        if (g.needRight || g.needLeft) {
-            const side = g.needRight ? "right" : "left";
-            if (!refHandRequired(refFrame, side)) { rows.push({ label: g.label, err: null }); continue; }
-        }
-        let gradeable = true;
-        if (g.needRight && !(uVis.rightHand && rVis.rightHand)) gradeable = false;
-        if (g.needLeft && !(uVis.leftHand && rVis.leftHand)) gradeable = false;
-        if (g.needPose && !(uVis.pose && rVis.pose)) gradeable = false;
-        let err = 0;
-        for (let i = g.start; i < g.end; i++) {
-            const w = FEATURE_WEIGHTS[i];
-            err += gradeable ? w * (uf[i] - rf[i]) * (uf[i] - rf[i]) : w;
-        }
-        rows.push({ label: g.label, err });
-        total += err;
-    }
-    return { rows, total };
 }
 
 // Is this reference hold's `side` hand something the learner must be showing?
@@ -859,10 +796,7 @@ function scoreActiveModel(user) {
     // outright win: two holds in one sign can be genuinely identical, and an
     // exact tie resolved to whichever came first, leaving the later one
     // permanently unreachable.
-    if (q[curPhase] > phaseBest[curPhase]) {
-        phaseBest[curPhase] = q[curPhase];
-        phaseErrorBreakdown[curPhase] = errorBreakdown(matches[curPhase].um, holds[curPhase]); // TEMP diagnostic
-    }
+    if (q[curPhase] > phaseBest[curPhase]) phaseBest[curPhase] = q[curPhase];
     if (q[curPhase] >= HOLD_COMPLETE_Q && q[curPhase] >= q[bestIdx] - MATCH_TOLERANCE) {
         if (!phaseReached[curPhase]) {
             // Close off the transition that led here, for the time penalty.
@@ -884,10 +818,7 @@ function scoreActiveModel(user) {
     ) {
         curPhase++;
         phaseEnteredAt = performance.now();
-        if (q[curPhase] > phaseBest[curPhase]) {
-            phaseBest[curPhase] = q[curPhase];
-            phaseErrorBreakdown[curPhase] = errorBreakdown(matches[curPhase].um, holds[curPhase]); // TEMP
-        }
+        if (q[curPhase] > phaseBest[curPhase]) phaseBest[curPhase] = q[curPhase];
     }
 
     // Taking too long multiplies the whole attempt, compounding per overrun
@@ -1017,7 +948,6 @@ function clearAttemptIfHandsAway(user) {
         ? `Attempt cleared. Start again from ${restartTarget} whenever you're ready.`
         : `Start from ${restartTarget} whenever you're ready.`;
     if (sentenceActive && sentenceViewMode === "all") renderGlossStrip();
-    else updateCoachDebug({ P: activePhaseModel.holds.length, curPhase, q: activePhaseModel.holds.map(() => 0), displayScore: 0, worstIdx: -1, worstDiff: 0, prompt: "hands away - reset" });
     return true;
 }
 
@@ -1038,18 +968,16 @@ function analyzeFeedback(results) {
     if (limbMsg) {
         missingLimbFrames++;
         if (missingLimbFrames >= 3) {
-            const P = activePhaseModel.holds.length;
             document.getElementById("coach-feedback-status").textContent = "Show required limbs";
             document.getElementById("coach-feedback-message").textContent = limbMsg;
             document.getElementById("coach-score-display").textContent = `${lastDisplayScore}%`;
-            updateCoachDebug({ P, curPhase, q: activePhaseModel.holds.map(() => 0), displayScore: lastDisplayScore, worstIdx: -1, worstDiff: 0, prompt: limbMsg });
             return;
         }
     } else {
         missingLimbFrames = 0;
     }
 
-    const { P, q, matches, displayScore, allPhasesReached: done, worstIdx, worstDiff, bestIdx } = scoreActiveModel(user);
+    const { P, q, displayScore, allPhasesReached: done, worstIdx, worstDiff } = scoreActiveModel(user);
     lastDisplayScore = displayScore;
 
     // Finishing locks the score on screen; taking the hands away (handled above)
@@ -1087,8 +1015,6 @@ function analyzeFeedback(results) {
     document.getElementById("coach-feedback-status").textContent = `Score: ${displayScore}%`;
     document.getElementById("coach-feedback-message").textContent = feedback;
     document.getElementById("coach-score-display").textContent = `${displayScore}%`;
-
-    updateCoachDebug({ P, curPhase, q, displayScore, worstIdx, worstDiff });
 }
 
 // Concatenates every word's precomputed holds into one ordered phase
@@ -1222,12 +1148,6 @@ function endSentenceSession() {
 
     const prefetch = document.getElementById("practice-ref-video-prefetch");
     if (prefetch) prefetch.removeAttribute("src");
-
-    const gallery = document.getElementById("phase-frames");
-    if (gallery) {
-        gallery.style.display = "none";
-        gallery.innerHTML = "";
-    }
 }
 
 // Sentence-mode view selector - chips rendered into #sentence-gloss-strip (see
@@ -1255,17 +1175,12 @@ function setSentenceViewMode(mode) {
     applyViewMode();
 }
 
-// Drives the reference-video display + phase-frame gallery for whichever mode
-// is active. Scoring state (activePhaseModel etc.) is set separately by
-// resumeCombinedModel()/focusOnWord() before this is called.
+// Drives the reference-video display for whichever mode is active. Scoring
+// state (activePhaseModel etc.) is set separately by resumeCombinedModel()/
+// focusOnWord() before this is called.
 function applyViewMode() {
-    if (sentenceViewMode === "all") {
-        playCombinedVideo();
-        showSentencePhaseFrames();
-    } else {
-        loadWordVideo(sentenceViewMode);
-        showWordPhaseFrames(sentenceViewMode);
-    }
+    if (sentenceViewMode === "all") playCombinedVideo();
+    else loadWordVideo(sentenceViewMode);
 }
 
 // Point the active phase model back at the whole-sentence combined model and
@@ -1378,10 +1293,10 @@ function renderGlossStrip() {
         .map((word, i) => {
             const progressCls = isWordDone(i) ? "done" : "";
             const selectedCls = sentenceViewMode === word ? "view-active" : "";
-            return `<span class="gloss-chip ${progressCls} ${selectedCls}" style="cursor:pointer;" onclick="setSentenceViewMode('${word}')" title="Focus this word: its own video, phase frames, and camera check">${i + 1}. ${word}</span>`;
+            return `<span class="gloss-chip ${progressCls} ${selectedCls}" style="cursor:pointer;" onclick="setSentenceViewMode('${word}')" title="Focus this word: its own video and camera check">${i + 1}. ${word}</span>`;
         })
         .join("");
-    const viewChip = `<span class="gloss-chip ${sentenceViewMode === "all" ? "view-active" : ""}" style="margin-left:auto; cursor:pointer;" onclick="setSentenceViewMode('all')" title="Combined video, phase frames, and camera check for the whole sentence">All</span>`;
+    const viewChip = `<span class="gloss-chip ${sentenceViewMode === "all" ? "view-active" : ""}" style="margin-left:auto; cursor:pointer;" onclick="setSentenceViewMode('all')" title="Combined video and camera check for the whole sentence">All</span>`;
     strip.innerHTML = wordChips + viewChip;
 }
 
@@ -1465,7 +1380,6 @@ function analyzeSentenceFeedback(results) {
         document.getElementById("coach-score-display").textContent = `${result.displayScore}%`;
     }
 
-    updateSentenceDebug(result, bestWord, bestQ, curIdx);
     renderGlossStrip(); // isWordDone() reads live phaseReached, so this can change any frame, not just on completion
 
     if (result.allPhasesReached) {
@@ -1483,27 +1397,6 @@ function finishSentenceSession(finalScore) {
     document.getElementById("coach-feedback-message").textContent =
         `All ${sentenceGloss.length} words matched — score ${finalScore}%.`;
     document.getElementById("coach-score-display").textContent = `${finalScore}%`;
-}
-
-function updateSentenceDebug(result, bestWord, bestQ, curIdx) {
-    if (!coachDebug) return;
-    const el = document.getElementById("coach-debug");
-    if (!el) return;
-    // Per-word contributions, so an even split is visible as such: each word
-    // shows what fraction of its OWN checkpoints it has banked and at what
-    // quality, and every one of them is worth the same share of the total.
-    const perWord = (sentenceCombinedModel ? sentenceCombinedModel.wordPhaseRanges : []).map(([start, end], i) => {
-        if (end <= start) return `${sentenceGloss[i]}:n/a`;
-        let banked = 0, sum = 0;
-        for (let p = start; p < end; p++) {
-            if (phaseReached[p]) { banked++; sum += phaseBest[p]; }
-        }
-        return `${sentenceGloss[i]} ${banked}/${end - start}@${Math.round((sum / (end - start)) * 100)}%`;
-    }).join("  ");
-    el.textContent =
-        `word ${curIdx + 1}/${sentenceGloss.length} "${sentenceGloss[curIdx]}" | phase ${curPhase + 1}/${result.P} | ` +
-        `score ${result.displayScore}% | time x${result.timePenalty.toFixed(2)} | ${perWord} | ` +
-        `classifier top match: ${bestWord} (${Math.round(bestQ * 100)}%)`;
 }
 
 // Match of a user frame to a hold target pose, considering BOTH orientations so
@@ -1560,191 +1453,6 @@ function jointDiagnostic(user, target) {
         if (d > maxDiff) { maxDiff = d; idx = k; }
     }
     return { idx, diff: maxDiff };
-}
-
-function setCoachDebug(on) {
-    coachDebug = on;
-    const el = document.getElementById("coach-debug");
-    if (el && !on) el.style.display = "none";
-}
-
-// [TEMP/DEBUG] Render the reference frame at each detected phase (hold) so the
-// segmentation can be eyeballed. Seeks the ref video to each hold's timestamp
-// and captures a thumbnail. Triggered by the "Show Phase Frames" button.
-async function showPhaseFrames() {
-    if (sentenceActive) {
-        return sentenceViewMode === "all" ? showSentencePhaseFrames() : showWordPhaseFrames(sentenceViewMode);
-    }
-
-    const gallery = document.getElementById("phase-frames");
-    if (!gallery) return;
-    gallery.style.display = "flex";
-
-    const signName = (typeof activeSign !== "undefined" && activeSign) ? activeSign.sign_name.toLowerCase() : null;
-    const model = signName && phaseCache[signName];
-    if (!model || !model.holdTimes || !model.holdTimes.length) {
-        gallery.innerHTML = `<span style="color:var(--text-secondary)">No phase model yet — open a sign and let the reference finish analyzing.</span>`;
-        return;
-    }
-    const video = document.getElementById("practice-ref-video");
-    if (!video || !video.duration) {
-        gallery.innerHTML = `<span style="color:var(--text-secondary)">Reference video not ready.</span>`;
-        return;
-    }
-
-    const wasPaused = video.paused, wasLoop = video.loop, t0 = video.currentTime;
-    video.pause();
-    video.loop = false;
-    gallery.innerHTML = `<span style="color:var(--text-secondary)">Capturing ${model.holdTimes.length} phase(s)…</span>`;
-
-    const cnv = document.createElement("canvas");
-    cnv.width = 160; cnv.height = 120;
-    const ctx = cnv.getContext("2d");
-    const figs = [];
-    try {
-        for (let i = 0; i < model.holdTimes.length; i++) {
-            const t = Math.min(Math.max(model.holdTimes[i], 0), video.duration - 0.01);
-            await seekVideo(video, t);
-            ctx.drawImage(video, 0, 0, cnv.width, cnv.height);
-            const need = model.requires;
-            figs.push(`<div style="text-align:center;font-size:0.72rem;color:var(--text-secondary);">
-                <img src="${cnv.toDataURL("image/jpeg", 0.7)}" style="width:160px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border-color);">
-                <div style="margin-top:0.25rem;">Phase ${i + 1}/${model.holdTimes.length} · t=${t.toFixed(2)}s</div>
-            </div>`);
-            if (i === 0) figs.unshift(`<div style="align-self:center;font-size:0.72rem;color:var(--text-secondary);padding-right:0.5rem;">needs ${need.hands} hand(s)${need.pose ? " + body" : ""}:</div>`);
-        }
-        gallery.innerHTML = figs.join("");
-    } catch (e) {
-        // Tainted-canvas SecurityError: the video's host doesn't send CORS
-        // headers, so pixels can't be read back for a thumbnail. Debug-only
-        // feature - degrade to a message instead of an uncaught exception.
-        gallery.innerHTML = `<span style="color:var(--text-secondary)">Can't capture thumbnails - reference video host doesn't allow cross-origin pixel reads.</span>`;
-    }
-
-    video.loop = wasLoop;
-    try { video.currentTime = t0; } catch (e) { /* ignore */ }
-    if (!wasPaused) video.play().catch(() => {});
-}
-
-// Loads `word`'s reference clip into an offscreen video (doesn't touch the
-// visible #practice-ref-video, which the combined chain or focus mode owns
-// independently) and captures a thumbnail at each of its phase model's hold
-// timestamps. Shared by the combined ("all") and single-word galleries below.
-async function captureWordPhaseThumbnails(word, ctx, cnv) {
-    const model = phaseCache[word];
-    if (!model || !model.holdTimes || !model.holdTimes.length) return null;
-
-    const tempVideo = document.createElement("video");
-    tempVideo.crossOrigin = "anonymous";
-    tempVideo.muted = true;
-    tempVideo.playsInline = true;
-    tempVideo.src = `${VIDEO_BASE_URL}/${encodeURIComponent(word)}.mp4`;
-    await new Promise((resolve) => {
-        tempVideo.onloadeddata = resolve;
-        tempVideo.onerror = resolve;
-        tempVideo.load();
-    });
-    if (!tempVideo.duration) return null;
-
-    const frames = [];
-    for (let i = 0; i < model.holdTimes.length; i++) {
-        const t = Math.min(Math.max(model.holdTimes[i], 0), tempVideo.duration - 0.01);
-        await seekVideo(tempVideo, t);
-        ctx.drawImage(tempVideo, 0, 0, cnv.width, cnv.height);
-        frames.push(cnv.toDataURL("image/jpeg", 0.7));
-    }
-    return { model, frames };
-}
-
-// "All" view mode's combined phase-frame gallery: every gloss word's hold
-// thumbnails, in sentence order.
-async function showSentencePhaseFrames() {
-    const gallery = document.getElementById("phase-frames");
-    if (!gallery) return;
-    gallery.style.display = "flex";
-
-    if (!sentenceGloss.length) {
-        gallery.innerHTML = `<span style="color:var(--text-secondary)">No sentence loaded.</span>`;
-        return;
-    }
-    gallery.innerHTML = `<span style="color:var(--text-secondary)">Capturing phase frames for ${sentenceGloss.length} word(s)…</span>`;
-
-    const cnv = document.createElement("canvas");
-    cnv.width = 160; cnv.height = 120;
-    const ctx = cnv.getContext("2d");
-    const figs = [];
-
-    for (let w = 0; w < sentenceGloss.length; w++) {
-        const word = sentenceGloss[w];
-        const result = await captureWordPhaseThumbnails(word, ctx, cnv);
-        if (!result) continue;
-
-        figs.push(`<div style="align-self:center;font-size:0.78rem;font-weight:600;color:var(--text-main);padding:0 0.35rem;">${w + 1}. ${word}</div>`);
-        result.frames.forEach((dataUrl, i) => {
-            figs.push(`<div style="text-align:center;font-size:0.72rem;color:var(--text-secondary);">
-                <img src="${dataUrl}" style="width:160px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border-color);">
-                <div style="margin-top:0.25rem;">Phase ${i + 1}/${result.frames.length}</div>
-            </div>`);
-        });
-    }
-    gallery.innerHTML = figs.join("") || `<span style="color:var(--text-secondary)">No phase models available yet.</span>`;
-}
-
-// Single-word view mode's phase-frame gallery: just the focused word's holds.
-async function showWordPhaseFrames(word) {
-    const gallery = document.getElementById("phase-frames");
-    if (!gallery) return;
-    gallery.style.display = "flex";
-    gallery.innerHTML = `<span style="color:var(--text-secondary)">Capturing phase frames for "${word}"…</span>`;
-
-    const cnv = document.createElement("canvas");
-    cnv.width = 160; cnv.height = 120;
-    const ctx = cnv.getContext("2d");
-    const result = await captureWordPhaseThumbnails(word, ctx, cnv);
-    if (!result) {
-        gallery.innerHTML = `<span style="color:var(--text-secondary)">No phase model yet for "${word}".</span>`;
-        return;
-    }
-
-    const need = result.model.requires;
-    const figs = [`<div style="align-self:center;font-size:0.72rem;color:var(--text-secondary);padding-right:0.5rem;">needs ${need.hands} hand(s)${need.pose ? " + body" : ""}:</div>`];
-    result.frames.forEach((dataUrl, i) => {
-        figs.push(`<div style="text-align:center;font-size:0.72rem;color:var(--text-secondary);">
-            <img src="${dataUrl}" style="width:160px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--border-color);">
-            <div style="margin-top:0.25rem;">Phase ${i + 1}/${result.frames.length}</div>
-        </div>`);
-    });
-    gallery.innerHTML = figs.join("");
-}
-
-// Live scoring breakdown so calibration can be data-driven against a real camera.
-const NEWLINE = String.fromCharCode(10); // TEMP diagnostic helper
-
-function updateCoachDebug(d) {
-    const el = document.getElementById("coach-debug");
-    if (!el) return;
-    if (!coachDebug) { el.style.display = "none"; return; }
-    el.style.display = "block";
-    const qs = d.q.map((x) => x.toFixed(2)).join(",");
-    const bests = phaseBest.map((x) => x.toFixed(2)).join(",");
-    const reached = phaseReached.map((x) => (x ? "✓" : "·")).join("");
-    const worst = d.worstIdx >= 0 ? `${d.worstIdx} Δ${d.worstDiff.toFixed(2)}` : "none";
-    // TEMP diagnostic: where each pose's best-frame error actually sat.
-    const breakdown = phaseErrorBreakdown.map((b, i) => {
-        if (!b || !b.total) return null;
-        const parts = b.rows
-            .filter((r) => r.err !== null && r.err > 0)
-            .sort((a, c) => c.err - a.err)
-            .map((r) => `${r.label} ${Math.round(100 * r.err / b.total)}%`);
-        return `  pose ${i + 1} (best ${phaseBest[i].toFixed(2)}): ${parts.join(", ")}`;
-    }).filter(Boolean);
-
-    el.textContent =
-        `phases ${d.P} | on ${d.curPhase + 1}/${d.P} | q[${qs}] | best[${bests}] | reached ${reached} | ` +
-        `score ${d.displayScore}% | worst joint: ${worst}` +
-        (breakdown.length ? `
-error split at each pose's best frame:
-${breakdown.join(NEWLINE)}` : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -1935,30 +1643,6 @@ function cosineSim(u, v) {
     for (let i = 0; i < u.length; i++) { dot += u[i] * v[i]; mu += u[i] * u[i]; mv += v[i] * v[i]; }
     if (mu === 0 || mv === 0) return 0;
     return dot / Math.sqrt(mu * mv);
-}
-
-// Metric 3D pose landmarks ("world landmarks" - hip-centered, not 0-1 image-
-// normalized) for the avatar retargeting pipeline. The @mediapipe/holistic
-// CDN build this app loads does NOT expose these under the documented
-// `results.poseWorldLandmarks` name (verified empirically - that property is
-// absent), but the data IS present under an internal, minified property key
-// that isn't a stable public API (and could rename on any future update,
-// since the CDN URL is unpinned). So this detects it by SHAPE instead of by
-// name: a same-length array of 33 landmarks, structurally like poseLandmarks
-// (x/y/z/visibility), but a DIFFERENT array (world landmarks are centered
-// near 0 and can be negative; poseLandmarks are 0-1 normalized image coords).
-function findWorldLandmarks(results) {
-    const pose = results.poseLandmarks;
-    if (!pose) return null;
-    for (const key of Object.keys(results)) {
-        const val = results[key];
-        if (val === pose || !Array.isArray(val) || val.length !== pose.length) continue;
-        const p0 = val[0];
-        if (p0 && typeof p0.x === "number" && typeof p0.y === "number" && typeof p0.z === "number" && typeof p0.visibility === "number") {
-            return val;
-        }
-    }
-    return null;
 }
 
 // ---------------------------------------------------------------------------

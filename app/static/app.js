@@ -11,12 +11,13 @@ const VIDEO_BASE_URL = "/videos";
 // Site content (dictionary/lessons/sentences) baked to static JSON by
 // scripts/build_static_data.py - there's no backend on GitHub Pages to serve
 // /api/* at request time, so this loads once and everything below reads from
-// it in memory instead of fetching per page. dictionaryByName + aliasIndex
-// (gloss_matching.js) back sentence lookup/parsing the same way the old
-// /api/dictionary/{name} and /api/sentences/parse endpoints did server-side.
+// it in memory instead of fetching per page. dictionaryByName backs sign
+// lookup the same way the old /api/dictionary/{name} endpoint did server-side;
+// aliasIndex + categoryByName (gloss_matching.js) back the typed-sentence flow.
 let siteData = null;
 let dictionaryByName = new Map();
 let aliasIndex = new Map();
+let categoryByName = new Map();
 let siteDataPromise = null;
 
 function loadSiteData() {
@@ -34,6 +35,7 @@ function loadSiteData() {
             siteData = { dictionary, lessons, sentences };
             dictionaryByName = new Map(dictionary.map((s) => [s.sign_name, s]));
             aliasIndex = buildAliasIndex(dictionary.map((s) => s.sign_name));
+            categoryByName = new Map(dictionary.map((s) => [s.sign_name, s.category]));
         });
     }
     return siteDataPromise;
@@ -81,45 +83,6 @@ function difficultyFor(signName) {
     if (!holds) return null;
     const tier = DIFFICULTY_TIERS.find((t) => holds <= t.max);
     return { ...tier, holds };
-}
-
-// Template-based random sentence synthesis (not a translator, not an LLM
-// call) for the "Auto-generate" button - JS port of the same templates
-// main.py used to run server-side. English + gloss are produced together so
-// there's no parsing ambiguity for generated text.
-const PRONOUN_COPULA = {
-    "i": "am", "you": "are", "he": "is", "she": "is", "it": "is",
-    "we": "are", "they": "are", "you (plural)": "are",
-};
-
-function titleCase(s) {
-    return s.replace(/\w\S*/g, (w) => w[0].toUpperCase() + w.slice(1));
-}
-
-const GENERATE_TEMPLATES = [
-    ["Pronouns", "Adjectives", (a, b) => `${titleCase(a)} ${PRONOUN_COPULA[a] || "is"} ${b}.`],
-    ["People", "Adjectives", (a, b) => `${titleCase(a)} is ${b}.`],
-    ["Days And Time", "Adjectives", (a, b) => `${titleCase(a)} is ${b}.`],
-    ["Animals", "Adjectives", (a, b) => `The ${a} is ${b}.`],
-    ["Clothes", "Adjectives", (a, b) => `The ${a} is ${b}.`],
-    ["Transportation", "Adjectives", (a, b) => `The ${a} is ${b}.`],
-    ["Jobs", "Adjectives", (a, b) => `The ${a} is ${b}.`],
-    ["Places", "Adjectives", (a, b) => (a === "india" ? `${titleCase(a)} is ${b}.` : `The ${a} is ${b}.`)],
-    ["Animals", "Colours", (a, b) => `The ${a} is ${b}.`],
-];
-
-function randomSignInCategory(cat) {
-    const pool = siteData.dictionary.filter((s) => s.category === cat);
-    if (pool.length === 0) return null;
-    return pool[Math.floor(Math.random() * pool.length)];
-}
-
-function generateSentence() {
-    const [catA, catB, formatter] = GENERATE_TEMPLATES[Math.floor(Math.random() * GENERATE_TEMPLATES.length)];
-    const signA = randomSignInCategory(catA);
-    const signB = randomSignInCategory(catB);
-    if (!signA || !signB) return null;
-    return { english: formatter(signA.sign_name, signB.sign_name), gloss: [signA.sign_name, signB.sign_name] };
 }
 
 // URL routing: deep-linkable /dashboard/<sign> and /sentences/<slug>, plus
@@ -221,6 +184,27 @@ function showAlert(message, type = "success") {
         alert.style.display = "none";
     }, 4000);
 }
+
+// ISL grammar guide (static rules panel on the Sentences page).
+function openGrammarGuide() {
+    const modal = document.getElementById("grammar-modal");
+    if (!modal) return;
+    modal.style.display = "flex";
+    document.body.style.overflow = "hidden";
+    const closeBtn = modal.querySelector(".modal-close");
+    if (closeBtn) closeBtn.focus();
+}
+
+function closeGrammarGuide() {
+    const modal = document.getElementById("grammar-modal");
+    if (!modal) return;
+    modal.style.display = "none";
+    document.body.style.overflow = "";
+}
+
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeGrammarGuide();
+});
 
 // Load Lessons in Dashboard
 async function loadLessons() {
@@ -406,11 +390,11 @@ async function loadSentences() {
 }
 
 // Enter the practice arena in sentence mode. Shared by the curated-list flow
-// (startSentencePractice/startSentencePracticeBySlug) and the type-your-own/
-// auto-generate flow (practiceCustomSentence) - all already know the gloss
-// word list, so none needs anything beyond this DOM/session setup. `slug` is
-// only present for persisted (curated) sentences, so it's what makes the URL
-// deep-linkable; custom typed sentences don't get a URL of their own.
+// (startSentencePractice/startSentencePracticeBySlug) and the write-your-own
+// flow (practiceCustomSentence) - all already know the gloss word list, so
+// none needs anything beyond this DOM/session setup. `slug` is only present
+// for curated sentences, so it's what makes the URL deep-linkable; a typed
+// sentence doesn't get a URL of its own.
 function enterSentenceArena(englishText, glossWords, slug) {
     activeSign = null;
     document.getElementById("btn-arena-back").onclick = () => switchPage("sentences");
@@ -482,49 +466,61 @@ async function startSentencePracticeBySlug(slug) {
     }
 }
 
-// "Auto-generate" button: fills the input with a suggested sentence. Only
-// fills the text - the gloss is always (re)computed at Practice-time from
-// whatever's actually in the box, so editing the suggestion can't go stale.
-async function generateCustomSentence() {
-    try {
-        await loadSiteData();
-        const data = generateSentence();
-        if (!data) {
-            showAlert("Could not generate a sentence.", "error");
-            return;
-        }
-        document.getElementById("custom-sentence-input").value = data.english;
-    } catch (err) {
-        console.error("Error generating sentence:", err);
-        showAlert("Could not generate a sentence.", "error");
-    }
+// Inline warning under the write-your-own input. Persistent (unlike showAlert's
+// 4s toast) so the learner can read which words to change, and cleared as soon
+// as they edit the sentence.
+function showCustomSentenceWarning(message) {
+    const el = document.getElementById("custom-sentence-warning");
+    if (!el) return;
+    el.textContent = message;
+    el.style.display = "block";
 }
 
-// "Practice" button: match whatever's typed against the dictionary's own
-// vocabulary (in typing order) and start a sentence session with the words
-// found. Not a translator - words with no dictionary match are skipped and
-// called out, not guessed at.
+function clearCustomSentenceWarning() {
+    const el = document.getElementById("custom-sentence-warning");
+    if (el) el.style.display = "none";
+}
+
+// "Practice" button for a sentence the learner wrote. The sentence is first
+// turned into its ISL gloss by rule (toGloss: function words dropped, NOT and
+// question words last, time / nouns / adjective / verb order), and THEN every
+// gloss sign is checked against the dictionary. If any is missing, practice is
+// refused and the learner is shown the gloss with the missing signs named -
+// "I don't have food" becomes I FOOD HAVE NOT, and I, FOOD, HAVE and NOT are
+// all reported - because the coach has no reference to grade them against.
 async function practiceCustomSentence() {
     const input = document.getElementById("custom-sentence-input");
     const text = (input.value || "").trim();
+    clearCustomSentenceWarning();
     if (!text) {
-        showAlert("Type a sentence first.", "error");
+        showCustomSentenceWarning("Write a sentence first.");
         return;
     }
     try {
         await loadSiteData();
-        const { gloss, unmatched } = parseSentence(text, aliasIndex);
-        if (gloss.length === 0) {
-            showAlert("No dictionary words found — try simpler words, like the ones in the Dictionary tab.", "error");
+        const { gloss: tokens, missing } = toGloss(text, aliasIndex, categoryByName);
+        const glossText = tokens.map((t) => t.label.toUpperCase()).join(" ");
+        if (missing.length > 0) {
+            const quoted = missing.map((w) => w.toUpperCase());
+            const list = quoted.length === 1
+                ? quoted[0]
+                : `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
+            showCustomSentenceWarning(
+                `In ISL this is signed "${glossText}", but ${list} ${quoted.length === 1 ? "is" : "are"} ` +
+                "not available in this dictionary. Change or remove the word, or pick words from the Dictionary tab."
+            );
             return;
         }
-        if (unmatched.length > 0) {
-            showAlert(`Skipped (not in the dictionary): ${unmatched.join(", ")}`, "error");
+        if (tokens.length === 0) {
+            showCustomSentenceWarning("No signable words found - add a word from the Dictionary tab.");
+            return;
         }
+        const gloss = tokens.map((t) => t.sign);
+        showAlert(`ISL order: ${glossText}`);
         enterSentenceArena(text, gloss);
     } catch (err) {
         console.error("Error parsing custom sentence:", err);
-        showAlert("Could not start practice for that sentence.", "error");
+        showCustomSentenceWarning("Could not start practice for that sentence.");
     }
 }
 
@@ -665,13 +661,6 @@ function changeVideoSpeed(speed) {
     const video = document.getElementById("practice-ref-video");
     if (!video) return;
     video.playbackRate = parseFloat(speed);
-}
-
-// Finish a practice session (no server persistence). Sentence sessions return
-// to the Sentences list; single-sign practice returns to the dashboard.
-function finishSession() {
-    showAlert("Practice session completed. Great work!");
-    switchPage(sentenceActive ? "sentences" : "dashboard");
 }
 
 function handleVideoToggle(isShowSign) {

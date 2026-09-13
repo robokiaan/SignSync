@@ -3,8 +3,8 @@ name: Deploy static site to GitHub Pages
 # Serves app/static/ as-is, after regenerating the dictionary/lessons/
 # sentences JSON (scripts/build_static_data.py) from the source manifests -
 # see that script's docstring. Reference videos are NOT part of this: they're
-# hosted externally (VIDEO_BASE_URL in app.js), so this artifact stays small
-# and fast to deploy on every push.
+# assets on the "videos-v1" GitHub Release (VIDEO_RELEASE_URL in app.js), so
+# this artifact stays small and fast to deploy on every push.
 
 on:
   push:
@@ -37,6 +37,9 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          # Switch Pages on (source = GitHub Actions) if the repo hasn't yet.
+          enablement: true
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

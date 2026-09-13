@@ -180,7 +180,7 @@ let activePrimeId = 0;         // guards against overlapping reference primings
 // missed for this file. Also matters for build_phases_from_labels.py, which
 // relies on this fetch seeing the CURRENT file (it writes phases.json empty
 // before priming so live priming actually runs) rather than a stale cache.
-const precomputedPhasesPromise = fetch("/phases.json", { cache: "no-cache" })
+const precomputedPhasesPromise = fetch("phases.json", { cache: "no-cache" })
     .then((r) => (r.ok ? r.json() : {}))
     .catch(() => ({}));
 
@@ -1219,7 +1219,7 @@ function loadWordVideo(word) {
         video.style.display = "block";
         video.play().catch(() => {});
     };
-    video.src = `${VIDEO_BASE_URL}/${encodeURIComponent(word)}.mp4`;
+    video.src = videoUrl(word);
     video.load();
 }
 
@@ -1253,7 +1253,7 @@ function loadChainedWord(idx) {
         video.play().catch(() => {});
         prefetchNextChainedWord(idx);
     };
-    video.src = `${VIDEO_BASE_URL}/${encodeURIComponent(word)}.mp4`;
+    video.src = videoUrl(word);
     video.load();
 }
 
@@ -1268,7 +1268,7 @@ function prefetchNextChainedWord(idx) {
     const pre = document.getElementById("practice-ref-video-prefetch");
     if (!pre || sentenceGloss.length === 0) return;
     const nextWord = sentenceGloss[(idx + 1) % sentenceGloss.length];
-    pre.src = `${VIDEO_BASE_URL}/${encodeURIComponent(nextWord)}.mp4`;
+    pre.src = videoUrl(nextWord);
     pre.load();
 }
 

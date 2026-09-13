@@ -10,8 +10,13 @@
     // in the query string; index.html's inline script restores it via
     // history.replaceState before app.js's router runs.
     // Pattern: https://github.com/rafgraph/spa-github-pages
+    // On a Pages project site the app is mounted at /<repo>/, so the redirect
+    // target is that folder's index, and the restored path keeps the prefix
+    // (app.js's router strips it via window.APP_BASE, set in index.html).
+    var onPages = /\.github\.io$/i.test(location.hostname);
+    var base = onPages ? "/" + location.pathname.split("/")[1] : "";
     var path = location.pathname + location.search + location.hash;
-    location.replace("/index.html?redirect=" + encodeURIComponent(path));
+    location.replace(base + "/?redirect=" + encodeURIComponent(path));
 </script>
 </head>
 <body></body>

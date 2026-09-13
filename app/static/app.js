@@ -2,11 +2,28 @@
 let activePage = "dashboard";
 let activeSign = null;
 
-// Where the reference .mp4 files are served from. Default: same origin (/videos).
-// To host the ~1.3 GB video set off the app server (e.g. Cloudflare R2 / S3),
-// set this to that bucket's base URL — it MUST send CORS headers, because the
-// phase model draws each frame to a canvas (cross-origin video would taint it).
-const VIDEO_BASE_URL = "/videos";
+// Where the reference .mp4 files are served from. The 1.3 GB video set is not
+// in the repo (gitignored) - it lives as assets on a GitHub Release, which is
+// what the deployed site streams from. On localhost the same clips are read
+// from app/static/videos under their original names instead, so local dev and
+// the phase-labelling scripts keep working offline. No CORS is needed either
+// way: nothing reads video pixels back off a canvas any more.
+//
+// Release assets can't carry spaces or brackets, so each clip is stored under
+// a slug (videoAssetName): "you (plural)" -> you_plural.mp4. Regenerate with
+// the same rule if the set is ever re-uploaded.
+const VIDEO_RELEASE_URL = "https://github.com/robokiaan/SignSync/releases/download/videos-v1";
+const VIDEO_LOCAL_URL = "videos";
+const USE_LOCAL_VIDEOS = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+
+function videoAssetName(signName) {
+    return signName.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") + ".mp4";
+}
+
+function videoUrl(signName) {
+    if (USE_LOCAL_VIDEOS) return `${VIDEO_LOCAL_URL}/${encodeURIComponent(signName)}.mp4`;
+    return `${VIDEO_RELEASE_URL}/${videoAssetName(signName)}`;
+}
 
 // Site content (dictionary/lessons/sentences) baked to static JSON by
 // scripts/build_static_data.py - there's no backend on GitHub Pages to serve
@@ -28,9 +45,9 @@ function loadSiteData() {
         // index.html/app.js did before that got fixed.
         const opts = { cache: "no-cache" };
         siteDataPromise = Promise.all([
-            fetch("/data/dictionary.json", opts).then((r) => r.json()),
-            fetch("/data/lessons.json", opts).then((r) => r.json()),
-            fetch("/data/sentences.json", opts).then((r) => r.json()),
+            fetch("data/dictionary.json", opts).then((r) => r.json()),
+            fetch("data/lessons.json", opts).then((r) => r.json()),
+            fetch("data/sentences.json", opts).then((r) => r.json()),
         ]).then(([dictionary, lessons, sentences]) => {
             siteData = { dictionary, lessons, sentences };
             dictionaryByName = new Map(dictionary.map((s) => [s.sign_name, s]));
@@ -59,7 +76,7 @@ const DIFFICULTY_TIERS = [
 
 function loadDifficulty() {
     if (!difficultyPromise) {
-        difficultyPromise = fetch("/phases.json", { cache: "no-cache" })
+        difficultyPromise = fetch("phases.json", { cache: "no-cache" })
             .then((r) => r.json())
             .then((phases) => {
                 holdCountByName = new Map(
@@ -96,9 +113,24 @@ function difficultyFor(signName) {
 // use, and those calls call setUrl - which must be a no-op in that direction.
 let suppressUrlUpdate = false;
 
+// Mount point of the app on this host ("" at an origin root, "/<repo>" on a
+// GitHub Pages project site) - set by the inline script in index.html that
+// also inserts the matching <base>. Routes are written and read relative to
+// it, so /SignSync/dashboard/hello and /dashboard/hello are the same route.
+function appBase() {
+    return window.APP_BASE || "";
+}
+
+function appPath(pathname) {
+    const base = appBase();
+    if (base && pathname.startsWith(base)) return pathname.slice(base.length) || "/";
+    return pathname;
+}
+
 function setUrl(path) {
     if (suppressUrlUpdate) return;
-    if (location.pathname !== path) history.pushState({}, "", path);
+    const full = appBase() + path;
+    if (location.pathname !== full) history.pushState({}, "", full);
 }
 
 async function handleRoute(path) {
@@ -124,11 +156,11 @@ async function handleRoute(path) {
     }
 }
 
-window.addEventListener("popstate", () => handleRoute(location.pathname));
+window.addEventListener("popstate", () => handleRoute(appPath(location.pathname)));
 
 // Initialize App -> route off the current URL (no authentication).
 document.addEventListener("DOMContentLoaded", () => {
-    handleRoute(location.pathname);
+    handleRoute(appPath(location.pathname));
 });
 
 // Navigation Router
@@ -609,7 +641,7 @@ async function startPractice(signName, lessonTitle) {
             // reads frames off a canvas anymore - and setting crossOrigin on a
             // cross-origin host that doesn't send CORS headers (e.g. GitHub
             // Releases) would make the browser refuse to even play the video.
-            video.src = `${VIDEO_BASE_URL}/${encodeURIComponent(signKey)}.mp4`;
+            video.src = videoUrl(signKey);
             video.load();
         }
         return true;

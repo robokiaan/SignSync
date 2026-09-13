@@ -4,7 +4,25 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SignSync ISL - Learn Indian Sign Language with AI</title>
-    <link rel="stylesheet" href="/styles.css?v=60">
+
+    <!-- Where the app is mounted. On a GitHub Pages project site that is
+    /<repo>/ (https://robokiaan.github.io/SignSync/), everywhere else it is
+    the origin root. A <base> is inserted before any asset tag so every
+    relative URL below - stylesheet, scripts, data/phases fetches - resolves
+    against the mount point no matter which client route the page was opened
+    on; app.js's router uses window.APP_BASE to strip/prefix that same
+    segment on the URL bar. Must stay ahead of the stylesheet link. -->
+    <script>
+        (function () {
+            var onPages = /\.github\.io$/i.test(location.hostname);
+            var base = onPages ? "/" + location.pathname.split("/")[1] : "";
+            window.APP_BASE = base;
+            var el = document.createElement("base");
+            el.href = base + "/";
+            document.head.appendChild(el);
+        })();
+    </script>
+    <link rel="stylesheet" href="styles.css?v=61">
 
     <!-- GitHub Pages has no server-side rewrites, so a direct hit on a client
     route (e.g. /dashboard/alright) 404s and lands on 404.html, which redirects
@@ -347,8 +365,8 @@
     <div id="global-alert" class="alert-popup">Alert text</div>
 
     <!-- Application scripts -->
-    <script src="/gloss_matching.js?v=5"></script>
-    <script src="/app.js?v=73"></script>
-    <script src="/coach.js?v=87"></script>
+    <script src="gloss_matching.js?v=5"></script>
+    <script src="app.js?v=74"></script>
+    <script src="coach.js?v=88"></script>
 </body>
 </html>

@@ -67,7 +67,13 @@ const POSITION_DIMS = [5, 6, 7, 14, 15, 16, 22, 23, 24, 25];
 // sentence combined model, so this one gate covers both uniformly). Without
 // it, a noisy frame during a fast transition could satisfy the advance
 // condition and skip a phase the learner never actually held.
-const PHASE_TRANSITION_DELAY_MS = 300;
+//
+// Currently 0: the state machine advances on the same sample that banks a
+// checkpoint, so the only floor on signing speed is the 100 ms live sampling
+// rate (USER_THROTTLE_MS) plus the frame smoothing. Was 300, then 200. Raise
+// it again if fast transitions start banking checkpoints off single blurry
+// frames.
+const PHASE_TRANSITION_DELAY_MS = 0;
 
 // A checkpoint counts if it clears HOLD_COMPLETE_Q and lands within this margin
 // of the best-scoring checkpoint - it does not have to win outright. Two
@@ -1003,9 +1009,7 @@ function analyzeFeedback(results) {
         // one already scores 0.82 from simply standing in the one before), and
         // some sit ON the path between their neighbours, so "pose 3 of 5" named
         // a boundary that isn't there and appeared to skip.
-        const onLastPose = curPhase === P - 1;
-        if (onLastPose) feedback = "That's it — hold it steady.";
-        else feedback = "Good — keep going.";
+        feedback = "Good — keep going.";
     } else if (worstIdx >= 0 && worstDiff > 0.18) {
         feedback = FEATURE_FEEDBACK[worstIdx];
     } else {

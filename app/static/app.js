@@ -50,12 +50,13 @@ function loadSiteData() {
     return siteDataPromise;
 }
 
-// A sign's difficulty is how many held poses it has: a 1-pose sign is a single
-// shape to hit, while a 5-pose sign is a whole ordered sequence, each pose
-// scored separately. Hold counts come from phases.json (the same file the coach
-// scores against), so difficulty can never drift out of sync with what the
-// learner is actually graded on. Cached like siteData - the browser already has
-// this file from the practice page.
+// A sign's difficulty tier comes from how many distinct positions its
+// reference moves through (the hold count in phases.json, the same file the
+// coach scores against), so it can never drift out of sync with what the
+// learner is actually graded on. Only the tier is ever shown - the count stays
+// internal so nobody tries to sign "positions" instead of the whole movement.
+// Cached like siteData - the browser already has this file from the practice
+// page.
 let holdCountByName = new Map();
 let difficultyPromise = null;
 
@@ -267,19 +268,15 @@ async function loadLessons() {
 
             let itemsListHtml = '<div style="display:flex; flex-wrap:wrap; gap: 0.5rem; margin-top: 0.75rem;">';
             items.forEach((item) => {
-                // Same pose-count difficulty the dictionary shows, condensed to
-                // fit a button: a coloured left edge plus the pose count. The
-                // full wording lives in the tooltip.
+                // Same difficulty tier the dictionary shows, condensed to fit a
+                // button: a coloured left edge, with the tier name in the
+                // tooltip. The underlying count stays internal - see the
+                // difficulty-legend comment in index.html.
                 const diff = difficultyFor(item.sign.sign_name);
-                const pip = diff
-                    ? `<span class="pose-pip">${diff.holds}</span>`
-                    : "";
-                const title = diff
-                    ? `${diff.label} - ${diff.holds} pose${diff.holds > 1 ? "s" : ""} to match`
-                    : "Difficulty unknown";
+                const title = diff ? `${diff.label} difficulty` : "Difficulty unknown";
                 itemsListHtml += `
                     <button class="btn btn-secondary sign-chip${diff ? ` diff-${diff.key}` : ""}" title="${title}" onclick="startPractice('${item.sign.sign_name}', '${lesson.title}')" style="width:auto; padding:0.4rem 0.8rem; font-size:0.85rem; text-transform:capitalize;">
-                        🎬 ${item.sign.sign_name}${pip}
+                        🎬 ${item.sign.sign_name}
                     </button>
                 `;
             });
@@ -349,9 +346,8 @@ async function loadDictionary() {
             const diff = difficultyFor(sign.sign_name);
             dictCard.className = "dict-card glass" + (diff ? ` diff-${diff.key}` : "");
             dictCard.onclick = () => startPractice(sign.sign_name, "Dictionary Search");
-            const poses = diff ? `${diff.holds} pose${diff.holds > 1 ? "s" : ""}` : "";
             const diffTag = diff
-                ? `<span class="tag tag-${diff.key}" title="${poses} to match">${diff.label} · ${poses}</span>`
+                ? `<span class="tag tag-${diff.key}" title="${diff.label} difficulty">${diff.label}</span>`
                 : "";
             dictCard.innerHTML = `
                 <h3>${sign.sign_name}</h3>

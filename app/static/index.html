@@ -22,7 +22,7 @@
             document.head.appendChild(el);
         })();
     </script>
-    <link rel="stylesheet" href="styles.css?v=61">
+    <link rel="stylesheet" href="styles.css?v=62">
 
     <!-- GitHub Pages has no server-side rewrites, so a direct hit on a client
     route (e.g. /dashboard/alright) 404s and lands on 404.html, which redirects
@@ -77,15 +77,16 @@
                 <!-- Full-Width Column: Lessons list -->
                 <div style="grid-column: 1 / -1;">
                     <h2 class="lessons-section-header">Structured INCLUDE Curriculum</h2>
-                    <!-- The number on each sign is how many held poses it has,
-                         which is exactly what the coach scores - so it is the
-                         honest measure of how hard that sign is to complete. -->
+                    <!-- Difficulty is derived from how many distinct positions the
+                         sign moves through (see difficultyFor in app.js), but the
+                         learner only sees the tier - never a count, so nobody is
+                         tempted to sign "positions" instead of the whole movement. -->
                     <div class="difficulty-legend">
-                        <span>Signs run easiest to hardest. Number = poses to match:</span>
-                        <span class="tag tag-easy">1 Easy</span>
-                        <span class="tag tag-medium">2 Medium</span>
-                        <span class="tag tag-hard">3 Hard</span>
-                        <span class="tag tag-expert">4+ Expert</span>
+                        <span>Signs run easiest to hardest:</span>
+                        <span class="tag tag-easy">Easy</span>
+                        <span class="tag tag-medium">Medium</span>
+                        <span class="tag tag-hard">Hard</span>
+                        <span class="tag tag-expert">Expert</span>
                     </div>
                     <div class="lessons-list" id="dashboard-lessons-container">
                         <!-- Lessons populated dynamically -->
@@ -279,7 +280,7 @@
                     </button>
 
                 </div>
-                <p class="coach-disclaimer">Checks key positions in the sign, not your whole movement &mdash; use the reference video as your guide.</p>
+                <p class="coach-disclaimer">Perform the whole sign as shown in the reference video &mdash; the coach compares your hands and arms against it as you go.</p>
             </div>
 
         </div>
@@ -355,7 +356,7 @@
                     <li>The INCLUDE dictionary used here has nouns, pronouns, adjectives, colours and time words, but no verb signs. Sentences are therefore written without the verb slot: <code>TOMORROW WE SCHOOL</code> stands for TOMORROW WE SCHOOL GO.</li>
                     <li>Every curated sentence's English uses only words that have a sign, so the gloss is exactly the English content words, reordered by rules 1 to 3.</li>
                     <li>A sentence you write yourself is first turned into its gloss by these rules (small words dropped, NOT and question words moved to the end, verbs last) and only then checked: every sign in that gloss must exist in the dictionary, or the coach shows you the gloss and names the signs it cannot grade. "I don't have food" becomes I FOOD HAVE NOT, and none of those four has a sign here.</li>
-                    <li>The coach checks the hand poses of each word in order. Facial grammar (rule 7) is not tracked; practise it anyway.</li>
+                    <li>The coach compares your hands and arms against the reference for each word, in order. Facial grammar (rule 7) is not tracked; practise it anyway.</li>
                 </ul>
             </div>
         </div>
@@ -366,7 +367,7 @@
 
     <!-- Application scripts -->
     <script src="gloss_matching.js?v=5"></script>
-    <script src="app.js?v=74"></script>
-    <script src="coach.js?v=88"></script>
+    <script src="app.js?v=75"></script>
+    <script src="coach.js?v=91"></script>
 </body>
 </html>

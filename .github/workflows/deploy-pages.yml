@@ -2,9 +2,10 @@ name: Deploy static site to GitHub Pages
 
 # Serves app/static/ as-is, after regenerating the dictionary/lessons/
 # sentences JSON (scripts/build_static_data.py) from the source manifests -
-# see that script's docstring. Reference videos are NOT part of this: they're
-# assets on the "videos-v1" GitHub Release (VIDEO_RELEASE_URL in app.js), so
-# this artifact stays small and fast to deploy on every push.
+# see that script's docstring. The reference videos ship with it from
+# app/static/videos - the 720p fast-start set built by
+# scripts/transcode_videos.py (~110 MB) - so Pages serves them same-origin as
+# video/mp4 with range requests, which phones need.
 
 on:
   push:

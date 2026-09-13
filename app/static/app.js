@@ -2,27 +2,19 @@
 let activePage = "dashboard";
 let activeSign = null;
 
-// Where the reference .mp4 files are served from. The 1.3 GB video set is not
-// in the repo (gitignored) - it lives as assets on a GitHub Release, which is
-// what the deployed site streams from. On localhost the same clips are read
-// from app/static/videos under their original names instead, so local dev and
-// the phase-labelling scripts keep working offline. No CORS is needed either
-// way: nothing reads video pixels back off a canvas any more.
-//
-// Release assets can't carry spaces or brackets, so each clip is stored under
-// a slug (videoAssetName): "you (plural)" -> you_plural.mp4. Regenerate with
-// the same rule if the set is ever re-uploaded.
-const VIDEO_RELEASE_URL = "https://github.com/robokiaan/SignSync/releases/download/videos-v1";
-const VIDEO_LOCAL_URL = "videos";
-const USE_LOCAL_VIDEOS = location.hostname === "localhost" || location.hostname === "127.0.0.1";
-
-function videoAssetName(signName) {
-    return signName.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") + ".mp4";
-}
+// Where the reference .mp4 files are served from: app/static/videos, in the
+// repo, relative to the app's <base> so it works at an origin root and under
+// the GitHub Pages /SignSync/ mount alike. These are the 720p fast-start
+// re-encodes from scripts/transcode_videos.py (~110 MB for the set), not the
+// 1080p originals - the originals were tried as GitHub Release assets, which
+// come back as application/octet-stream with an attachment disposition, and
+// iOS Safari refuses to play video served that way. Same-origin on Pages gets
+// a proper video/mp4 type and range requests. No CORS is involved: nothing
+// reads video pixels back off a canvas any more.
+const VIDEO_BASE_URL = "videos";
 
 function videoUrl(signName) {
-    if (USE_LOCAL_VIDEOS) return `${VIDEO_LOCAL_URL}/${encodeURIComponent(signName)}.mp4`;
-    return `${VIDEO_RELEASE_URL}/${videoAssetName(signName)}`;
+    return `${VIDEO_BASE_URL}/${encodeURIComponent(signName)}.mp4`;
 }
 
 // Site content (dictionary/lessons/sentences) baked to static JSON by

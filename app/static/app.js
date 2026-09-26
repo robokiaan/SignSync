@@ -439,7 +439,8 @@ function enterSentenceArena(englishText, glossWords, slug) {
 
     resetDTWSequences();
     resetCoachState();
-    startWebcamStream();
+    // Camera stays off until the learner presses Start Camera - no unprompted
+    // permission dialog on opening a sentence, and the reference plays first.
 
     beginSentenceSession(englishText, glossWords);
 }
@@ -576,10 +577,11 @@ async function startPractice(signName, lessonTitle) {
         const holdCount = precomputedPhases[signKey]?.holds?.length ?? 0;
         document.getElementById("btn-reset-attempt").style.display = holdCount > 1 ? "none" : "";
 
-        // Reset coach + DTW buffers before priming the new reference.
+        // Reset coach + DTW buffers before priming the new reference. The
+        // camera stays off until the learner presses Start Camera - no
+        // unprompted permission dialog on opening a sign.
         resetDTWSequences();
         resetCoachState();
-        startWebcamStream();
 
         setUrl(`/dashboard/${encodeURIComponent(signKey)}`);
 

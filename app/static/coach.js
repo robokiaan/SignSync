@@ -25,7 +25,7 @@ let isWebcamActive = false;
 // check that the moves go the right way). Because holds are the target, holding
 // a pose no longer collapses the score, and feedback is per-phase.
 const HOLD_MATCH_THRESHOLD = 0.60; // masked distance at which a hold's quality hits 0
-const HOLD_COMPLETE_Q = 0.55;      // quality above which a phase counts as "reached"
+const GRADE_MIN_Q = 0.60;          // a frame must resemble some pose at least this well to be graded at all
 const REF_MOTION_HOLD_FRAC = 0.45; // ref frame is a hold if motion < this fraction of the sign's peak motion
 const REF_MIN_HOLD_MOTION = 0.025; // absolute floor for the hold-motion threshold
 const PHASE_MERGE_DIST = 0.10;     // merge consecutive ref holds whose targets are closer than this
@@ -60,28 +60,18 @@ const REST_FLOOR = 0.95;
 const MOVE_WEIGHT = 0;
 // Feature indices that carry hand position/orientation (used for move direction).
 const POSITION_DIMS = [5, 6, 7, 14, 15, 16, 22, 23, 24, 25];
-// Minimum time the learner must dwell in a phase before the state machine will
-// advance them to the next one - gives a beat to physically switch poses
-// (whether that's the next hold within one sign, or the next word in a
-// sentence - curPhase advancement is the same mechanism for both since the
-// sentence combined model, so this one gate covers both uniformly). Without
-// it, a noisy frame during a fast transition could satisfy the advance
-// condition and skip a phase the learner never actually held.
-//
-// Currently 0: the state machine advances on the same sample that banks a
-// checkpoint, so the only floor on signing speed is the 100 ms live sampling
-// rate (USER_THROTTLE_MS) plus the frame smoothing. Was 300, then 200. Raise
-// it again if fast transitions start banking checkpoints off single blurry
-// frames.
-const PHASE_TRANSITION_DELAY_MS = 0;
+// Grading is per frame, against whichever pose the frame is CLOSEST to (see
+// scoreActiveModel). The pose the learner is expected to be on next - the
+// first ungraded one - gets a preference: if the frame is within this much of
+// the closest pose's quality, it is graded as the expected pose instead. That
+// keeps a learner who is doing the right thing from being credited to a
+// look-alike pose further on, without ever blocking them.
+const EXPECTED_TIE_MARGIN = 0.10;
 
-// A checkpoint counts if it clears HOLD_COMPLETE_Q and lands within this margin
-// of the best-scoring checkpoint - it does not have to win outright. Two
-// checkpoints in the same sign can be genuinely identical, and an exact tie used
-// to resolve to whichever came first, leaving the later one permanently
-// unreachable. Swept against the labelled data: correct-acceptance plateaus at
-// 0.05, while larger margins only add false advances.
-const MATCH_TOLERANCE = 0.05;
+// How long the "missed part of the movement" feedback stays up after a frame
+// grades a pose beyond the expected one (see scoreActiveModel), before the
+// normal per-frame coaching resumes.
+const SKIP_NOTICE_MS = 1500;
 
 // Wrist height (pose-derived, so it survives hand-tracking loss) below which a
 // hand counts as raised and therefore in use. Matches requiredLimbs' own test.
@@ -134,16 +124,19 @@ const TIME_PENALTY_FLOOR = 0.5;
 // Per-attempt scoring state (reset in resetDTWSequences)
 let activePhaseModel = null;   // { holds, moveDirs, holdTimes, requires }
 let phaseBest = [];            // best hold quality achieved per phase this attempt
-let phaseReached = [];         // has each phase been hit at least at HOLD_COMPLETE_Q?
+let phaseReached = [];         // has each phase been graded at least once (a frame at GRADE_MIN_Q or better)?
 let phaseUserPose = [];        // user feature vector captured when each phase was reached
-let curPhase = 0;              // phase the learner is currently working toward
-let phaseEnteredAt = 0;        // performance.now() when curPhase last changed - see PHASE_TRANSITION_DELAY_MS
+let skipNoticeUntil = 0;       // performance.now() until which the "missed part of the movement" notice stays up
+let curPhase = 0;              // the EXPECTED pose: first ungraded pose in the current grading scope (see scoreActiveModel)
+let phaseEnteredAt = 0;        // performance.now() when a pose was last graded for the first time - the time penalty clocks transitions from here
 let attemptComplete = false;   // final checkpoint banked; waiting for hands to leave before re-arming
 let handsAwaySince = 0;        // when the learner's hands first went off camera (0 = they're visible)
 let attemptArmed = true;       // ready to begin a new attempt on the next first-checkpoint hit
 let timeCrossings = 0;         // banked time-budget overruns this attempt
 let missingLimbFrames = 0;     // consecutive frames missing a required limb (debounces the prompt)
 let lastDisplayScore = 0;      // last score shown (kept while prompting for limbs)
+let sessionBestScore = null;   // highest attempt score for the sign/sentence currently open (null = no attempt yet)
+let previousAttemptScore = null; // score of the attempt before the one in progress
 let prevUserSmoothed = null;   // last smoothed user frame, for feature EMA
 
 // Sentence-practice session state (reset in endSentenceSession). The whole
@@ -204,6 +197,10 @@ const MEDIAPIPE_OPTIONS = {
 };
 
 function resetCoachState() {
+    // A new sign/sentence is being opened: its history starts empty.
+    sessionBestScore = null;
+    previousAttemptScore = null;
+    renderScoreHistory();
     document.getElementById("coach-score-display").textContent = "--%";
     document.getElementById("coach-feedback-status").textContent = "Idle";
     document.getElementById("coach-feedback-message").textContent = "Activate your webcam to begin real-time gesture analysis.";
@@ -317,6 +314,7 @@ function resetPhaseProgress() {
     phaseBest = new Array(P).fill(0);
     phaseReached = new Array(P).fill(false);
     phaseUserPose = new Array(P).fill(null);
+    skipNoticeUntil = 0;
     curPhase = 0;
     phaseEnteredAt = performance.now();
     attemptComplete = false;
@@ -327,11 +325,32 @@ function resetPhaseProgress() {
     lastDisplayScore = 0;
 }
 
+// An attempt has ended - the learner lowered their hands or pressed Reset with
+// progress on the board, finished or not. The score ON SCREEN at that moment
+// becomes "last try" and competes for "best". Recorded at the end, not when
+// the last pose first registers: the live number keeps rising for a beat
+// after that as the final pose settles, and recording early left the readouts
+// a few points below what the learner had just watched themselves score.
+// Attempts with no progress at all are not attempts.
+function recordAttemptScore(score) {
+    previousAttemptScore = score;
+    if (sessionBestScore === null || score > sessionBestScore) sessionBestScore = score;
+    renderScoreHistory();
+}
+
+function renderScoreHistory() {
+    const best = document.getElementById("coach-best-score");
+    const prev = document.getElementById("coach-prev-score");
+    if (best) best.textContent = sessionBestScore === null ? "--" : `${sessionBestScore}%`;
+    if (prev) prev.textContent = previousAttemptScore === null ? "--" : `${previousAttemptScore}%`;
+}
+
 // Manual reset for single-sign practice ("Reset" button): clears the
 // per-attempt phase state and the frame-smoothing buffer ("camera history",
 // same pairing resetDTWSequences/the sentence-redo reset use), and forces the
 // displayed score to 0% immediately rather than waiting for the next frame.
 function resetSignAttempt() {
+    if (attemptComplete || phaseReached.some(Boolean)) recordAttemptScore(lastDisplayScore);
     prevUserSmoothed = null;
     resetPhaseProgress();
     document.getElementById("coach-score-display").textContent = "0%";
@@ -783,48 +802,60 @@ function scoreActiveModel(user) {
     const holds = activePhaseModel.holds;
     const P = holds.length;
 
-    // How well the user's current pose matches each hold (mirror-aware). `um` is
-    // the user frame in whichever orientation matched, for feedback + move dir.
+    // How well the user's current frame matches each pose (mirror-aware). `um`
+    // is the user frame in whichever orientation matched, for feedback.
     const matches = holds.map((h) => matchHold(user, h));
     const q = matches.map((m) => m.q);
 
-    let bestIdx = 0;
-    for (let i = 1; i < P; i++) if (q[i] > q[bestIdx]) bestIdx = i;
-
-    // Phases run strictly in order: we are only ever looking for curPhase, so a
-    // pose resembling an EARLIER hold mid-sign is ignored rather than treated as
-    // progress. What still has to be ruled out is banking curPhase while the
-    // learner is really still standing in the previous pose, which happens when
-    // two consecutive holds look alike - hence comparing against the best hold
-    // rather than accepting any pose over the threshold.
+    // Every frame is graded against the pose it is CLOSEST to, and a pose's
+    // score is the best any frame ever read for it - a 0.70 frame then a 0.80
+    // frame then a 0.60 frame leaves the pose at 0.80. There is no sequence
+    // gate: missing a pose costs that pose's share of the score and nothing
+    // else, and coming back to it later still counts.
     //
-    // The comparison allows MATCH_TOLERANCE of slack instead of demanding an
-    // outright win: two holds in one sign can be genuinely identical, and an
-    // exact tie resolved to whichever came first, leaving the later one
-    // permanently unreachable.
-    if (q[curPhase] > phaseBest[curPhase]) phaseBest[curPhase] = q[curPhase];
-    if (q[curPhase] >= HOLD_COMPLETE_Q && q[curPhase] >= q[bestIdx] - MATCH_TOLERANCE) {
-        if (!phaseReached[curPhase]) {
-            // Close off the transition that led here, for the time penalty.
-            recordTransitionTiming(curPhase);
-        }
-        phaseReached[curPhase] = true;
-        phaseUserPose[curPhase] = matches[curPhase].um.features.slice();
-    }
+    // Two refinements. A frame must resemble SOME pose at GRADE_MIN_Q or better
+    // or it is ignored (a transition, a fumble, a hand off camera). And the
+    // EXPECTED pose - the first one not yet graded, in order - is preferred:
+    // if the frame is within EXPECTED_TIE_MARGIN of the closest pose's
+    // quality, it is graded as the expected pose instead. Consecutive poses
+    // in a sign are small variations of each other, so without that a learner
+    // doing pose 2 correctly could be credited to a look-alike pose 4.
+    //
+    // In a sentence the scope is the current word's poses only: a frame is
+    // never graded against another word, so word order stays meaningful and
+    // the "that comes later in this sentence" feedback keeps its sense. And a
+    // frame that plainly belongs to another word - some pose outside the scope
+    // beats the best in-scope pose by more than the tie margin - is ignored
+    // rather than credited to whichever current-word pose it happens to
+    // resemble.
+    const [scopeStart, scopeEnd] = gradingScope(P);
+    curPhase = firstUngraded(scopeStart, scopeEnd);
 
-    // Advance once this phase is reached and they've dwelt here for at least
-    // PHASE_TRANSITION_DELAY_MS - a beat to physically switch poses. Advancing
-    // just moves which phase is being watched/diagnosed next; it does NOT
-    // mark that next phase reached; the check above has to independently see
-    // it on a later, fresh frame before it counts as done.
-    if (
-        curPhase < P - 1 &&
-        phaseReached[curPhase] &&
-        performance.now() - phaseEnteredAt >= PHASE_TRANSITION_DELAY_MS
-    ) {
-        curPhase++;
-        phaseEnteredAt = performance.now();
-        if (q[curPhase] > phaseBest[curPhase]) phaseBest[curPhase] = q[curPhase];
+    let closest = scopeStart;
+    for (let i = scopeStart + 1; i < scopeEnd; i++) if (q[i] > q[closest]) closest = i;
+    let closestAnywhere = 0;
+    for (let i = 1; i < P; i++) if (q[i] > q[closestAnywhere]) closestAnywhere = i;
+    const belongsHere = q[closestAnywhere] <= q[closest] + EXPECTED_TIE_MARGIN;
+
+    let graded = -1;
+    if (belongsHere && q[closest] >= GRADE_MIN_Q) {
+        const expectedOk = q[curPhase] >= GRADE_MIN_Q && q[curPhase] >= q[closest] - EXPECTED_TIE_MARGIN;
+        graded = expectedOk ? curPhase : closest;
+    }
+    if (graded >= 0) {
+        if (!phaseReached[graded]) {
+            // First time this pose is graded: close off the transition that led
+            // here, for the time penalty, and start clocking the next one.
+            recordTransitionTiming(graded);
+            phaseReached[graded] = true;
+            phaseEnteredAt = performance.now();
+            if (graded > curPhase) skipNoticeUntil = performance.now() + SKIP_NOTICE_MS;
+        }
+        if (q[graded] > phaseBest[graded]) {
+            phaseBest[graded] = q[graded];
+            phaseUserPose[graded] = matches[graded].um.features.slice();
+        }
+        curPhase = firstUngraded(scopeStart, scopeEnd);
     }
 
     // Taking too long multiplies the whole attempt, compounding per overrun
@@ -833,23 +864,46 @@ function scoreActiveModel(user) {
     const timePenalty = currentTimePenalty();
     const displayScore = Math.min(100, Math.round(aggregatePhaseScore(P) * timePenalty * 100));
 
-    // Diagnose against the current phase's target (post-advance), in whichever
-    // orientation matched.
-    const target = holds[curPhase];
-    const { idx: worstIdx, diff: worstDiff } = jointDiagnostic(matches[curPhase].um, target);
+    // Diagnose against the expected pose, in whichever orientation matched.
+    const { idx: worstIdx, diff: worstDiff } = jointDiagnostic(matches[curPhase].um, holds[curPhase]);
 
-    return { P, q, matches, displayScore, allPhasesReached: phaseReached.every(Boolean), worstIdx, worstDiff, bestIdx, timePenalty };
+    // Done once the LAST pose of the model has been graded. Earlier poses that
+    // were never graded simply score 0 - the learner chose to move on.
+    return { P, q, matches, displayScore, allPhasesReached: P > 0 && phaseReached[P - 1], worstIdx, worstDiff, bestIdx: closest, timePenalty };
 }
 
-// How the banked per-checkpoint qualities add up to one score.
+// [start, end) of the poses a frame may be graded against: the whole sign, or
+// in a sentence the first word whose last pose is not yet graded (the last
+// word once every word is done).
+function gradingScope(P) {
+    const ranges = activePhaseModel && activePhaseModel.wordPhaseRanges;
+    if (!ranges || ranges.length === 0) return [0, P];
+    for (const [start, end] of ranges) {
+        if (end > start && !phaseReached[end - 1]) return [start, end];
+    }
+    const last = ranges[ranges.length - 1];
+    return last[1] > last[0] ? last : [0, P];
+}
+
+// The expected pose: first ungraded pose in [start, end), or the last pose of
+// the scope once every one is graded.
+function firstUngraded(start, end) {
+    for (let p = start; p < end; p++) if (!phaseReached[p]) return p;
+    return Math.max(start, end - 1);
+}
+
+// Is the "missed part of the movement" notice still current? Shown briefly
+// when a frame grades a pose beyond the expected one, so the learner knows an
+// earlier pose is still open and the ceiling is lower until they get it.
+function skipNoticeActive() {
+    return skipNoticeUntil > performance.now();
+}
+
+// How the per-pose bests add up to one score.
 //
-// Only checkpoints the learner has actually BANKED count. The one being worked
-// on contributes nothing: it used to contribute its live quality, so once the
-// state machine advanced you were credited for a pose you had not hit - and
-// because consecutive poses in a sign resemble each other (the two in "he"
-// match each other at 0.62), simply standing in the previous pose scored most
-// of the next one. Half of "he" performed read as 81%. Banked qualities latch,
-// so the number only ever climbs within an attempt.
+// Each pose contributes the best quality any frame was graded against it
+// (phaseBest, 0 if never graded). Bests only ever rise, so the number only
+// ever climbs within an attempt.
 //
 // A plain sign averages over its checkpoints. A SENTENCE averages per word
 // first, then over words, so every word is worth the same 1/N regardless of how
@@ -939,6 +993,9 @@ function clearAttemptIfHandsAway(user) {
     if (!somethingToClear || performance.now() - handsAwaySince < HANDS_AWAY_RESET_MS) return false;
 
     const wasMidAttempt = !attemptComplete && phaseReached.some(Boolean);
+    // Finished or abandoned, this attempt is over: its on-screen score is what
+    // gets recorded. Read before resetPhaseProgress wipes it.
+    recordAttemptScore(lastDisplayScore);
     attemptComplete = false;
     attemptArmed = true;      // next first-checkpoint hit starts a fresh attempt
     handsAwaySince = 0;
@@ -1001,7 +1058,11 @@ function analyzeFeedback(results) {
             ? "Excellent — you matched the whole sign! "
             : (displayScore < 60 ? "Try again more slowly, following the reference closely. " : "");
         feedback = `${praise}Lower your hands to go again.`;
-    } else if (q[curPhase] >= HOLD_COMPLETE_Q) {
+    } else if (skipNoticeActive()) {
+        // A frame just graded a pose beyond the expected one. Say so without
+        // naming it - see below - then get out of the way.
+        feedback = "Missed part of the movement — keep going.";
+    } else if (q[curPhase] >= GRADE_MIN_Q) {
         // Deliberately says nothing about which checkpoint this is. The model
         // splits a sign into held poses to score it, but the learner performs
         // one continuous movement and never experiences those divisions -
@@ -1082,13 +1143,21 @@ function currentWordRequires() {
     return perWord[currentWordIndex()] || activePhaseModel.requires;
 }
 
+// A word is done once its last pose has been graded (matches gradingScope).
 function isWordDone(i) {
     if (!sentenceCombinedModel) return false;
     const [start, end] = sentenceCombinedModel.wordPhaseRanges[i];
+    return end > start && phaseReached[end - 1];
+}
+
+// Did the learner leave any pose of word i ungraded? (Meaningful once done.)
+function wordHasSkips(i) {
+    if (!sentenceCombinedModel) return false;
+    const [start, end] = sentenceCombinedModel.wordPhaseRanges[i];
     for (let p = start; p < end; p++) {
-        if (!phaseReached[p]) return false;
+        if (!phaseReached[p]) return true;
     }
-    return end > start;
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,9 +1364,13 @@ function renderGlossStrip() {
     strip.style.display = "flex";
     const wordChips = sentenceGloss
         .map((word, i) => {
-            const progressCls = isWordDone(i) ? "done" : "";
+            const done = isWordDone(i);
+            const progressCls = done ? (wordHasSkips(i) ? "done partial" : "done") : "";
             const selectedCls = sentenceViewMode === word ? "view-active" : "";
-            return `<span class="gloss-chip ${progressCls} ${selectedCls}" style="cursor:pointer;" onclick="setSentenceViewMode('${word}')" title="Focus this word: its own video and camera check">${i + 1}. ${word}</span>`;
+            const title = done && wordHasSkips(i)
+                ? "Part of this word's movement was missed. Focus this word: its own video and camera check"
+                : "Focus this word: its own video and camera check";
+            return `<span class="gloss-chip ${progressCls} ${selectedCls}" style="cursor:pointer;" onclick="setSentenceViewMode('${word}')" title="${title}">${i + 1}. ${word}</span>`;
         })
         .join("");
     const viewChip = `<span class="gloss-chip ${sentenceViewMode === "all" ? "view-active" : ""}" style="margin-left:auto; cursor:pointer;" onclick="setSentenceViewMode('all')" title="Combined video and camera check for the whole sentence">All</span>`;
@@ -1343,7 +1416,7 @@ function analyzeSentenceFeedback(results) {
     const curIdx = currentWordIndex();
 
     // Freeze the finished score in place; clearAttemptIfHandsAway above is what
-    // releases it.
+    // releases it (and records the score at that point).
     if (result.allPhasesReached) attemptComplete = true;
 
     // Classification pass: does the learner look more like a DIFFERENT gloss
@@ -1380,7 +1453,9 @@ function analyzeSentenceFeedback(results) {
         document.getElementById("coach-feedback-status").textContent = `Score: ${result.displayScore}%`;
         document.getElementById("coach-feedback-message").textContent = result.allPhasesReached
             ? "Sentence complete!"
-            : `Sign "${sentenceGloss[curIdx]}" (word ${curIdx + 1}/${sentenceGloss.length}).`;
+            : (skipNoticeActive()
+                ? `Missed part of "${sentenceGloss[curIdx]}" — keep going.`
+                : `Sign "${sentenceGloss[curIdx]}" (word ${curIdx + 1}/${sentenceGloss.length}).`);
         document.getElementById("coach-score-display").textContent = `${result.displayScore}%`;
     }
 

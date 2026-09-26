@@ -22,7 +22,7 @@
             document.head.appendChild(el);
         })();
     </script>
-    <link rel="stylesheet" href="styles.css?v=62">
+    <link rel="stylesheet" href="styles.css?v=65">
 
     <!-- GitHub Pages has no server-side rewrites, so a direct hit on a client
     route (e.g. /dashboard/alright) 404s and lands on 404.html, which redirects
@@ -81,12 +81,13 @@
                          sign moves through (see difficultyFor in app.js), but the
                          learner only sees the tier - never a count, so nobody is
                          tempted to sign "positions" instead of the whole movement. -->
-                    <div class="difficulty-legend">
-                        <span>Signs run easiest to hardest:</span>
-                        <span class="tag tag-easy">Easy</span>
-                        <span class="tag tag-medium">Medium</span>
-                        <span class="tag tag-hard">Hard</span>
-                        <span class="tag tag-expert">Expert</span>
+                    <div class="difficulty-legend" role="note" aria-label="Difficulty key">
+                        <span class="legend-title">Key</span>
+                        <span class="legend-item"><i class="legend-swatch swatch-easy"></i>Easy</span>
+                        <span class="legend-item"><i class="legend-swatch swatch-medium"></i>Medium</span>
+                        <span class="legend-item"><i class="legend-swatch swatch-hard"></i>Hard</span>
+                        <span class="legend-item"><i class="legend-swatch swatch-expert"></i>Expert</span>
+                        <span class="legend-note">colour on each sign's edge; signs run easiest to hardest</span>
                     </div>
                     <div class="lessons-list" id="dashboard-lessons-container">
                         <!-- Lessons populated dynamically -->
@@ -258,7 +259,21 @@
                     
                     <div class="accuracy-gauge">
                         <div class="accuracy-score" id="coach-score-display">--%</div>
-                        <div class="accuracy-label">This Attempt</div>
+                        <div class="accuracy-label">Current</div>
+                    </div>
+
+                    <!-- Per-session history for this sign/sentence: cleared whenever a
+                         new one is opened (resetCoachState), updated each time an
+                         attempt ends (recordAttemptScore in coach.js). -->
+                    <div class="score-history" aria-label="Score history">
+                        <div class="score-history-item">
+                            <span class="score-history-value" id="coach-best-score">--</span>
+                            <span class="score-history-label">Best</span>
+                        </div>
+                        <div class="score-history-item">
+                            <span class="score-history-value" id="coach-prev-score">--</span>
+                            <span class="score-history-label">Last try</span>
+                        </div>
                     </div>
                     
                     <div class="coach-divider" style="width: 1px; height: 50px; background: var(--border-color);"></div>
@@ -367,7 +382,7 @@
 
     <!-- Application scripts -->
     <script src="gloss_matching.js?v=5"></script>
-    <script src="app.js?v=75"></script>
-    <script src="coach.js?v=91"></script>
+    <script src="app.js?v=76"></script>
+    <script src="coach.js?v=102"></script>
 </body>
 </html>
